@@ -6,20 +6,18 @@
   "author": "A2ureeE",
   "license": "UNLICENSED",
   "private": true,
-  "homepage": "https://github.com/A2ureeE/CrazyAutoDL",
+  "homepage": "https://github.com/zhuhaoxiang1/CrazyAutoDL-v2",
   "repository": {
     "type": "git",
-    "url": "https://github.com/A2ureeE/CrazyAutoDL.git"
+    "url": "https://github.com/zhuhaoxiang1/CrazyAutoDL-v2.git"
   },
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
     "demo": "electron . --demo",
+    "test": "node --test test/*.test.js",
     "pack": "electron-builder --dir --publish never",
     "dist": "electron-builder --win nsis --x64 --publish never"
-  },
-  "dependencies": {
-    "electron-updater": "6.8.9"
   },
   "devDependencies": {
     "electron": "44.9.1",
@@ -65,12 +63,6 @@
       "uninstallerIcon": "build/icon.ico",
       "runAfterFinish": true,
       "deleteAppDataOnUninstall": false
-    },
-    "publish": {
-      "provider": "github",
-      "owner": "A2ureeE",
-      "repo": "CrazyAutoDL",
-      "releaseType": "release"
     }
   }
 }

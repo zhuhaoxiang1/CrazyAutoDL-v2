@@ -14,6 +14,9 @@ const {
 
 const BASE_URL = 'https://www.autodl.com/api/v1';
 const SUCCESS_CODES = new Set(['Success', 'success', '0']);
+const REQUEST_TIMEOUT_MS = 20000;
+const STOCK_PAGE_SIZE = 100;
+const STOCK_MAX_PAGES = 10;
 
 class AutoDLError extends Error {
   constructor(kind, message, extra = {}) {
@@ -66,11 +69,15 @@ class AutoDLAPI {
   }
 
   async request(method, path, body) {
+    // The timer covers the whole exchange, response body included: a server that sends headers and then stalls
+    // must not hold the caller past the advertised timeout.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
-    let response;
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let status;
+    let ok;
+    let text = '';
     try {
-      response = await fetch(`${BASE_URL}${path}`, {
+      const response = await fetch(`${BASE_URL}${path}`, {
         method,
         headers: {
           Authorization: this.token,
@@ -81,6 +88,11 @@ class AutoDLAPI {
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
+      status = response.status;
+      ok = response.ok;
+      if (status !== 401 && status !== 403 && ok) {
+        text = await response.text();
+      }
     } catch (error) {
       if (error && error.name === 'AbortError') {
         throw new AutoDLError('network', '请求超时，请检查网络或代理');
@@ -90,17 +102,20 @@ class AutoDLAPI {
       clearTimeout(timer);
     }
 
-    if (response.status === 401 || response.status === 403) {
+    if (status === 401 || status === 403) {
       throw new AutoDLError('unauthorized', '登录已失效');
     }
-    if (!response.ok) {
-      throw new AutoDLError('http', `HTTP ${response.status}`, { status: response.status });
+    if (!ok) {
+      throw new AutoDLError('http', `HTTP ${status}`, { status });
     }
 
     let json;
     try {
-      json = await response.json();
+      json = JSON.parse(text);
     } catch {
+      throw new AutoDLError('invalidResponse', '响应不是有效 JSON');
+    }
+    if (!json || typeof json !== 'object') {
       throw new AutoDLError('invalidResponse', '响应不是有效 JSON');
     }
 
@@ -134,39 +149,51 @@ class AutoDLAPI {
   }
 
   async fetchGPUStock(instance) {
-    if (!instance.machineID) {
-      return {
-        idleGPUs: 0,
-        totalGPUs: null,
-        machineID: '',
-        gpuName: instance.gpuName,
-        requiredGPUs: instance.gpuCount,
-        checkedAt: new Date(),
-        machineFound: false,
-      };
-    }
-
-    const body = {
-      default_order: true,
-      gpu_idle_num: Math.max(instance.gpuCount, 1),
-      page_index: 1,
-      page_size: 100,
-    };
-    if (instance.gpuName) body.gpu_type_name = [instance.gpuName];
-    if (instance.regionSign) body.region_sign_list = [instance.regionSign];
-    if (instance.chargeType) body.charge_type = instance.chargeType;
-
-    const json = await this.request('POST', '/user/machine/list', body);
-    const result = parseMachineStock(json, instance.machineID);
-    return {
-      idleGPUs: result.idleGPUs,
-      totalGPUs: result.totalGPUs,
+    const base = {
+      instanceId: instance.id,
       machineID: instance.machineID,
       gpuName: instance.gpuName,
       requiredGPUs: instance.gpuCount,
       checkedAt: new Date(),
-      machineFound: result.machineFound,
     };
+    if (!instance.machineID) {
+      return { ...base, idleGPUs: 0, totalGPUs: null, machineFound: false, incomplete: false };
+    }
+
+    // The target host can sit past the first page of a large region/model result, so keep paging until it is found,
+    // the result set is exhausted, or the page cap is hit. A capped miss is reported as incomplete, not as "no card".
+    let seen = 0;
+    let exhausted = false;
+    for (let page = 1; page <= STOCK_MAX_PAGES; page += 1) {
+      const body = {
+        default_order: true,
+        gpu_idle_num: Math.max(instance.gpuCount, 1),
+        page_index: page,
+        page_size: STOCK_PAGE_SIZE,
+      };
+      if (instance.gpuName) body.gpu_type_name = [instance.gpuName];
+      if (instance.regionSign) body.region_sign_list = [instance.regionSign];
+      if (instance.chargeType) body.charge_type = instance.chargeType;
+
+      const json = await this.request('POST', '/user/machine/list', body);
+      const result = parseMachineStock(json, instance.machineID);
+      if (result.machineFound) {
+        return {
+          ...base,
+          idleGPUs: result.idleGPUs,
+          totalGPUs: result.totalGPUs,
+          machineFound: true,
+          incomplete: false,
+        };
+      }
+      seen += result.pageSize;
+      const total = result.resultTotal;
+      if (result.pageSize === 0 || (total != null && seen >= total) || (total == null && result.pageSize < STOCK_PAGE_SIZE)) {
+        exhausted = true;
+        break;
+      }
+    }
+    return { ...base, idleGPUs: 0, totalGPUs: null, machineFound: false, incomplete: !exhausted };
   }
 
   async powerOn(instanceUUID) {

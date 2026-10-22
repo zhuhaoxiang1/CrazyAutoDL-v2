@@ -112,8 +112,22 @@ enum DemoData {
             fetchedAt: now
         )
 
+        var devBox = lab
+        devBox = AutoDLInstance(
+            id: "demo-5c9e7d33", name: "dev-nocard", rawStatus: "running",
+            regionName: "北京B区", regionSign: "beijing-b", gpuName: "RTX 4090", gpuCount: 1,
+            machineID: "bj-4090-112", chargeType: "payg",
+            startedAt: calendar.date(byAdding: .hour, value: -1, to: now),
+            statusAt: calendar.date(byAdding: .minute, value: -2, to: now),
+            sshCommand: nil, rootPassword: nil, jupyterDomain: nil,
+            systemDiskTotal: 30 * gigabyte, systemDiskUsed: 9 * gigabyte,
+            dataDiskTotal: 50 * gigabyte, dataDiskUsed: 12 * gigabyte, diskExpandAvailable: 0,
+            memoryTotal: 16 * gigabyte, memoryUsed: 3 * gigabyte, releaseAt: releaseLater,
+            startMode: "non_gpu"
+        )
+
         return DemoSeed(
-            instances: [lab, training, inference],
+            instances: [lab, training, devBox, inference],
             selectedInstanceID: lab.id,
             stock: stock,
             balance: balance,

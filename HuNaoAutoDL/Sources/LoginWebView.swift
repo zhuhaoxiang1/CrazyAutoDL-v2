@@ -2,7 +2,7 @@ import SwiftUI
 import WebKit
 
 enum LoginWebSession {
-    static func clear() {
+    static func clear(completion: (() -> Void)? = nil) {
         let store = WKWebsiteDataStore.default()
         store.removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
@@ -10,6 +10,14 @@ enum LoginWebSession {
         ) {
             HTTPCookieStorage.shared.removeCookies(since: .distantPast)
             URLCache.shared.removeAllCachedResponses()
+            completion?()
+        }
+    }
+
+    @MainActor
+    static func clearAndWait() async {
+        await withCheckedContinuation { continuation in
+            clear { continuation.resume() }
         }
     }
 }

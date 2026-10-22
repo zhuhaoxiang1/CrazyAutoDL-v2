@@ -10,7 +10,6 @@ struct HuNaoAutoDLApp: App {
         Window("胡闹AutoDL", id: "main") {
             RootView()
                 .environmentObject(model)
-                .environmentObject(model.updater)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
@@ -19,22 +18,19 @@ struct HuNaoAutoDLApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
 
-            CommandGroup(after: .appInfo) {
-                Button("检查更新…") {
-                    model.selectedSection = .settings
-                    MenuBarController.shared.reopenMainWindow()
-                    Task { await model.updater.check() }
-                }
-                .disabled(model.updater.isBusy)
-
-                Divider()
-            }
+            // No "About" item: this build is its own app, not the released one.
+            CommandGroup(replacing: .appInfo) {}
 
             CommandMenu("监控") {
                 Button("立即刷新") {
                     model.refreshNow()
                 }
                 .keyboardShortcut("r", modifiers: .command)
+
+                Button(model.monitoringPaused ? "恢复监控" : "暂停监控") {
+                    model.setMonitoringPaused(!model.monitoringPaused)
+                }
+                .disabled(model.phase != .signedIn)
 
                 Button("打开 AutoDL 控制台") {
                     if let url = URL(string: "https://www.autodl.com/console/instance/list") {
@@ -44,7 +40,12 @@ struct HuNaoAutoDLApp: App {
 
                 Divider()
 
-                Button("退出登录") {
+                Button("添加账号…") {
+                    MenuBarController.shared.reopenMainWindow()
+                    model.beginAddAccount()
+                }
+
+                Button("退出当前账号") {
                     model.logout()
                 }
                 .disabled(model.phase != .signedIn)

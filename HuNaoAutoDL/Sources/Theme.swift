@@ -2,19 +2,7 @@ import AppKit
 import SwiftUI
 
 enum AppLinks {
-    static let author = "A2ureeE"
-    static let repositoryURL = URL(string: "https://github.com/A2ureeE/CrazyAutoDL")!
-    static let repositoryLabel = "github.com/A2ureeE/CrazyAutoDL"
-    static let instanceConsoleURL = URL(string: "https://www.autodl.com/console/instance/list")!
     static let billingConsoleURL = URL(string: "https://www.autodl.com/console/bill")!
-
-    static func openRepository() {
-        NSWorkspace.shared.open(repositoryURL)
-    }
-
-    static func openInstanceConsole() {
-        NSWorkspace.shared.open(instanceConsoleURL)
-    }
 
     static func openBillingConsole() {
         NSWorkspace.shared.open(billingConsoleURL)
@@ -24,40 +12,26 @@ enum AppLinks {
 enum AppTime {
     static let timeZone = TimeZone(identifier: "Asia/Shanghai") ?? TimeZone.current
 
-    static var calendar: Calendar {
+    static let calendar: Calendar = {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
         return calendar
-    }
+    }()
 }
 
 enum AppTheme {
-    static let mint = Color(red: 0.38, green: 0.98, blue: 0.76)
-    static let aqua = Color(red: 0.33, green: 0.81, blue: 1.00)
-    static let violet = Color(red: 0.60, green: 0.51, blue: 1.00)
-    static let amber = Color(red: 1.00, green: 0.76, blue: 0.34)
-    static let rose = Color(red: 1.00, green: 0.45, blue: 0.52)
-    static let textPrimary = Color.white.opacity(0.94)
-    static let textSecondary = Color.white.opacity(0.57)
-    static let textTertiary = Color.white.opacity(0.34)
+    static let mint = Color(red: 0.36, green: 0.86, blue: 0.56)
+    static let aqua = Color(red: 0.42, green: 0.65, blue: 0.90)
+    static let violet = Color(red: 0.62, green: 0.58, blue: 0.86)
+    static let amber = Color(red: 0.92, green: 0.70, blue: 0.36)
+    static let rose = Color(red: 0.90, green: 0.45, blue: 0.47)
+    static let textPrimary = Color.white.opacity(0.92)
+    static let textSecondary = Color.white.opacity(0.68)
+    static let textTertiary = Color.white.opacity(0.50)
 
-    static let pageBackground = Color(red: 0.027, green: 0.055, blue: 0.062)
-
-    static var accentGradient: LinearGradient {
-        LinearGradient(
-            colors: [mint, aqua],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
-    static var coolGradient: LinearGradient {
-        LinearGradient(
-            colors: [aqua, violet],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
+    static let pageBackground = Color(red: 0.047, green: 0.051, blue: 0.059)
+    static let panelBackground = Color(red: 0.067, green: 0.071, blue: 0.082)
+    static let border = Color.white.opacity(0.11)
 }
 
 extension InstanceState {
@@ -72,6 +46,35 @@ extension InstanceState {
     }
 }
 
+/// What a no-card boot request turned out to be, judged from the instance as AutoDL now reports it.
+enum NoCardBootCheck: Equatable {
+    /// Not up yet, or `start_mode` not reported: keep waiting.
+    case pending
+    /// Running as `non_gpu`.
+    case confirmed
+    /// Running as `gpu`: the request was not honoured and the instance bills as a GPU instance.
+    case mismatch
+}
+
+extension AutoDLInstance {
+    var noCardBootCheck: NoCardBootCheck {
+        // While starting, start_mode can still hold the previous boot's value, so only a running instance counts.
+        guard state == .running else { return .pending }
+        switch startMode.lowercased() {
+        case "non_gpu": return .confirmed
+        case "gpu": return .mismatch
+        default: return .pending
+        }
+    }
+
+    /// Running, but booted without a GPU: it holds no card and bills at the cheaper no-card rate.
+    var isNoCardMode: Bool { state == .running && startMode.lowercased() == "non_gpu" }
+    /// Running and occupying a card.
+    var holdsGPU: Bool { state == .running && !isNoCardMode }
+    var statusLabel: String { isNoCardMode ? "无卡运行" : state.label }
+    var statusTint: Color { isNoCardMode ? AppTheme.aqua : state.tint }
+}
+
 extension ActivityKind {
     var tint: Color {
         switch self {
@@ -79,107 +82,6 @@ extension ActivityKind {
         case .success: return AppTheme.mint
         case .warning: return AppTheme.amber
         case .error: return AppTheme.rose
-        }
-    }
-}
-
-struct VisualEffectView: NSViewRepresentable {
-    var material: NSVisualEffectView.Material = .underWindowBackground
-    var blendingMode: NSVisualEffectView.BlendingMode = .behindWindow
-
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material
-        view.blendingMode = blendingMode
-        view.state = .active
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-        nsView.state = .active
-    }
-}
-
-struct AuroraBackground: View {
-    @State private var drift = false
-
-    var body: some View {
-        ZStack {
-            VisualEffectView()
-
-            LinearGradient(
-                colors: [
-                    Color(red: 0.025, green: 0.07, blue: 0.078).opacity(0.94),
-                    Color(red: 0.025, green: 0.048, blue: 0.085).opacity(0.92),
-                    Color(red: 0.045, green: 0.035, blue: 0.075).opacity(0.94)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            Circle()
-                .fill(AppTheme.mint.opacity(0.26))
-                .frame(width: 620, height: 620)
-                .blur(radius: 150)
-                .offset(x: drift ? -330 : -390, y: drift ? -330 : -280)
-
-            Circle()
-                .fill(AppTheme.violet.opacity(0.30))
-                .frame(width: 620, height: 620)
-                .blur(radius: 170)
-                .offset(x: drift ? 480 : 420, y: drift ? -240 : -150)
-
-            Circle()
-                .fill(AppTheme.aqua.opacity(0.16))
-                .frame(width: 520, height: 520)
-                .blur(radius: 150)
-                .offset(x: drift ? 240 : 310, y: drift ? 420 : 370)
-
-            GridTexture()
-                .opacity(0.035)
-                .mask(
-                    LinearGradient(
-                        colors: [.white, .clear],
-                        startPoint: .topTrailing,
-                        endPoint: .bottomLeading
-                    )
-                )
-
-            LinearGradient(
-                colors: [.black.opacity(0.10), .black.opacity(0.30)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-        .ignoresSafeArea()
-        .onAppear {
-            withAnimation(.easeInOut(duration: 18).repeatForever(autoreverses: true)) {
-                drift = true
-            }
-        }
-    }
-}
-
-private struct GridTexture: View {
-    var body: some View {
-        Canvas { context, size in
-            var path = Path()
-            let spacing: CGFloat = 44
-            var x: CGFloat = 0
-            while x < size.width {
-                path.move(to: CGPoint(x: x, y: 0))
-                path.addLine(to: CGPoint(x: x, y: size.height))
-                x += spacing
-            }
-            var y: CGFloat = 0
-            while y < size.height {
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: size.width, y: y))
-                y += spacing
-            }
-            context.stroke(path, with: .color(.white), lineWidth: 0.5)
         }
     }
 }
@@ -193,11 +95,7 @@ struct WindowConfigurator: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            configure(nsView.window)
-        }
-    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 
     private func configure(_ window: NSWindow?) {
         guard let window else { return }
@@ -205,100 +103,21 @@ struct WindowConfigurator: NSViewRepresentable {
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
+        window.isOpaque = true
+        window.backgroundColor = NSColor(AppTheme.pageBackground)
         window.appearance = NSAppearance(named: .darkAqua)
-        window.minSize = NSSize(width: 1_060, height: 720)
-    }
-}
-
-struct GlassPanelModifier: ViewModifier {
-    var cornerRadius: CGFloat
-    var tint: Color
-    var interactive: Bool
-
-    private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-    }
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            if interactive {
-                content
-                    .glassEffect(
-                        .regular.tint(tint.opacity(0.20)).interactive(),
-                        in: shape
-                    )
-                    .overlay(border)
-                    .shadow(color: .black.opacity(0.22), radius: 26, x: 0, y: 14)
-            } else {
-                content
-                    .glassEffect(
-                        .regular.tint(tint.opacity(0.16)),
-                        in: shape
-                    )
-                    .overlay(border)
-                    .shadow(color: .black.opacity(0.22), radius: 26, x: 0, y: 14)
-            }
-        } else {
-            content
-                .background(.ultraThinMaterial, in: shape)
-                .background(tint.opacity(0.05), in: shape)
-                .overlay(border)
-                .shadow(color: .black.opacity(0.22), radius: 26, x: 0, y: 14)
-        }
-    }
-
-    private var border: some View {
-        shape
-            .strokeBorder(
-                LinearGradient(
-                    colors: [
-                        .white.opacity(0.34),
-                        .white.opacity(0.07),
-                        tint.opacity(0.18)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                lineWidth: 0.8
-            )
-            .overlay(alignment: .topLeading) {
-                Capsule()
-                    .fill(.white.opacity(0.25))
-                    .frame(width: 86, height: 1)
-                    .blur(radius: 0.6)
-                    .padding(.leading, 24)
-                    .padding(.top, 1)
-            }
-            .allowsHitTesting(false)
+        window.minSize = NSSize(width: 1_180, height: 720)
     }
 }
 
 extension View {
-    func glassPanel(
-        cornerRadius: CGFloat = 28,
-        tint: Color = .white,
-        interactive: Bool = false
-    ) -> some View {
-        modifier(GlassPanelModifier(cornerRadius: cornerRadius, tint: tint, interactive: interactive))
-    }
-
-    func panelBorder(cornerRadius: CGFloat = 28, tint: Color = .white) -> some View {
-        overlay {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [.white.opacity(0.26), .white.opacity(0.05), tint.opacity(0.14)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.7
-                )
-                .allowsHitTesting(false)
-        }
+    func panel(cornerRadius: CGFloat = 12) -> some View {
+        // v2: terminal look, so every panel is nearly square regardless of what the call site asks for.
+        let shape = RoundedRectangle(cornerRadius: min(cornerRadius, 4), style: .continuous)
+        return background(AppTheme.panelBackground, in: shape)
+            .overlay {
+                shape.strokeBorder(AppTheme.border, lineWidth: 1)
+            }
     }
 }
 
@@ -320,7 +139,6 @@ struct BrandMark: View {
             .resizable()
             .interpolation(.high)
             .frame(width: size, height: size)
-            .shadow(color: .black.opacity(0.38), radius: size * 0.2, x: 0, y: size * 0.09)
             .accessibilityLabel("胡闹AutoDL")
     }
 }
@@ -331,27 +149,27 @@ struct StatusPill: View {
     var showsDot = true
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             if showsDot {
-                Circle()
-                    .fill(tint)
-                    .frame(width: 5, height: 5)
-                    .shadow(color: tint.opacity(0.8), radius: 4)
+                Text("●")
+                    .scaledFont(size: 8)
+                    .foregroundStyle(tint)
             }
             Text(label)
-                .scaledFont(size: 11, weight: .semibold, design: .rounded)
-                .foregroundStyle(tint)
+                .scaledFont(size: 11, weight: .semibold)
+                .foregroundStyle(tint.opacity(0.95))
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(tint.opacity(0.11), in: Capsule())
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(tint.opacity(0.07), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
         .overlay {
-            Capsule().strokeBorder(tint.opacity(0.26), lineWidth: 0.7)
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .strokeBorder(tint.opacity(0.32), lineWidth: 1)
         }
     }
 }
 
-struct GlassIconButton: View {
+struct IconButton: View {
     let symbol: String
     let action: () -> Void
     var isActive = false
@@ -362,23 +180,21 @@ struct GlassIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .scaledFont(size: 13, weight: .semibold)
+                .scaledFont(size: 13, weight: .medium)
                 .foregroundStyle(isActive ? AppTheme.mint : AppTheme.textSecondary)
-                .frame(width: 36, height: 36)
+                .frame(width: 32, height: 32)
                 .contentShape(Rectangle())
-                .glassPanel(cornerRadius: 12, tint: isActive ? AppTheme.mint : .white, interactive: true)
+                .background(
+                    hovered ? Color.white.opacity(0.06) : AppTheme.panelBackground,
+                    in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                )
                 .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(
-                            isActive ? AppTheme.mint.opacity(0.30) : .white.opacity(hovered ? 0.20 : 0.09),
-                            lineWidth: 0.7
-                        )
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .strokeBorder(AppTheme.border, lineWidth: 1)
                 }
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.18)) { hovered = hovering }
-        }
+        .onHover { hovered = $0 }
         .help(help)
     }
 }
@@ -401,7 +217,8 @@ private struct ScaledFontModifier: ViewModifier {
     let design: Font.Design
 
     func body(content: Content) -> some View {
-        content.font(.system(size: size * scale, weight: weight, design: design))
+        // v2: nothing below 10pt; the old 8-9pt captions were hard to read on dark glass.
+        content.font(.system(size: max(size, 10) * scale, weight: weight, design: design == .default ? .monospaced : design))
     }
 }
 
@@ -420,40 +237,20 @@ struct ActionButtonStyle: ButtonStyle {
     var prominent = false
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaledFont(size: 12, weight: .semibold)
-            .foregroundStyle(prominent ? Color.black.opacity(0.82) : tint)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
+        let shape = RoundedRectangle(cornerRadius: 3, style: .continuous)
+        return configuration.label
+            .scaledFont(size: 12, weight: .medium)
+            .foregroundStyle(prominent ? Color.black.opacity(0.85) : tint)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
             .contentShape(Rectangle())
-            .background {
-                if prominent {
-                    Capsule().fill(
-                        LinearGradient(
-                            colors: [tint.opacity(0.98), tint.opacity(0.72)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                } else {
-                    Capsule().fill(tint.opacity(0.09))
+            .background(prominent ? tint : tint.opacity(0.06), in: shape)
+            .overlay {
+                if !prominent {
+                    shape.strokeBorder(tint.opacity(0.40), lineWidth: 1)
                 }
             }
-            .overlay {
-                Capsule().strokeBorder(
-                    prominent ? .white.opacity(0.40) : tint.opacity(0.22),
-                    lineWidth: 0.7
-                )
-            }
-            .shadow(
-                color: prominent ? tint.opacity(0.28) : .clear,
-                radius: 12,
-                x: 0,
-                y: 5
-            )
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .opacity(configuration.isPressed ? 0.82 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .opacity(configuration.isPressed ? 0.75 : 1)
     }
 }
 
@@ -462,53 +259,23 @@ struct CustomSwitch: View {
     var tint: Color = AppTheme.mint
     let action: () -> Void
 
+    // Drawn in SwiftUI: the system .switch style hosts an NSSwitch, which is slow to build on every page switch.
     var body: some View {
         Button(action: action) {
-            ZStack(alignment: isOn ? .trailing : .leading) {
-                Capsule()
-                    .fill(isOn ? tint.opacity(0.74) : Color.white.opacity(0.10))
-                    .overlay {
-                        Capsule()
-                            .strokeBorder(
-                                isOn ? tint.opacity(0.45) : .white.opacity(0.13),
-                                lineWidth: 0.8
-                            )
-                    }
-                    .shadow(color: isOn ? tint.opacity(0.36) : .clear, radius: 12, x: 0, y: 3)
-
-                Circle()
-                    .fill(.white.opacity(0.98))
-                    .overlay {
-                        Circle()
-                            .fill(
-                                LinearGradient(
-                                    colors: [.white, .white.opacity(0.72)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                    }
-                    .padding(3.5)
-                    .shadow(color: .black.opacity(0.26), radius: 5, x: 0, y: 2)
-            }
-            .frame(width: 48, height: 27)
+            Capsule()
+                .fill(isOn ? tint : Color.white.opacity(0.14))
+                .frame(width: 34, height: 20)
+                .overlay(alignment: isOn ? .trailing : .leading) {
+                    Circle()
+                        .fill(.white)
+                        .padding(2)
+                }
+                .animation(.easeOut(duration: 0.15), value: isOn)
         }
         .buttonStyle(.plain)
-        .animation(.spring(response: 0.36, dampingFraction: 0.78), value: isOn)
         .accessibilityLabel("自动开机")
-        .accessibilityValue(isOn ? "已开启" : "已关闭")
-    }
-}
-
-struct EyebrowLabel: View {
-    let text: String
-    var tint: Color = AppTheme.mint
-
-    var body: some View {
-        Text(text.uppercased())
-            .scaledFont(size: 9, weight: .bold, design: .rounded)
-            .tracking(1.8)
-            .foregroundStyle(tint.opacity(0.82))
+        .accessibilityValue(isOn ? "开" : "关")
+        .accessibilityAddTraits(.isToggle)
     }
 }
 
@@ -617,5 +384,67 @@ enum AppFormat {
             return String(format: "%.0f GB", gib)
         }
         return String(format: "%.1f GB", gib)
+    }
+}
+
+
+/// Section frame with a prompt-style title row: `▍ TITLE ........ trailing`.
+struct TermSection<Content: View, Trailing: View>: View {
+    let title: String
+    let trailing: Trailing
+    let content: Content
+
+    init(
+        _ title: String,
+        @ViewBuilder trailing: () -> Trailing = { EmptyView() },
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.trailing = trailing()
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text("▍")
+                    .scaledFont(size: 12, weight: .bold)
+                    .foregroundStyle(AppTheme.mint)
+                Text(title)
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(AppTheme.textSecondary)
+                Spacer(minLength: 8)
+                trailing
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+
+            Rectangle()
+                .fill(AppTheme.border)
+                .frame(height: 1)
+
+            content
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .panel()
+    }
+}
+
+/// Block-character meter, e.g. `████████░░░░░░░░`.
+struct AsciiBar: View {
+    let fraction: Double
+    var cells = 20
+    var tint: Color = AppTheme.mint
+    var size: CGFloat = 12
+
+    var body: some View {
+        let clamped = max(0, min(fraction, 1))
+        let filled = Int((clamped * Double(cells)).rounded())
+        (Text(String(repeating: "█", count: filled)).foregroundStyle(tint)
+            + Text(String(repeating: "░", count: max(cells - filled, 0))).foregroundStyle(Color.white.opacity(0.13)))
+            .scaledFont(size: size)
+            .lineLimit(1)
+            .fixedSize()
     }
 }

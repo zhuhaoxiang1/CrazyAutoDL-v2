@@ -5,30 +5,23 @@ enum TokenStore {
 
     private static var directoryURL: URL? {
         fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("HuNaoAutoDL", isDirectory: true)
+            .appendingPathComponent("HuNaoAutoDL-v2", isDirectory: true)
     }
 
-    private static var tokenURL: URL? {
-        directoryURL?.appendingPathComponent("session.token", isDirectory: false)
-    }
-
-    static func loadToken() -> String? {
-        guard let tokenURL,
-              let data = try? Data(contentsOf: tokenURL),
-              let token = String(data: data, encoding: .utf8)
+    static func loadSession(directory: URL? = nil) -> AutoDLSession? {
+        guard let directory = directory ?? directoryURL,
+              let data = try? Data(contentsOf: directory.appendingPathComponent("session.token"))
         else { return nil }
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        return AutoDLSession.decode(data)
     }
 
     @discardableResult
-    static func saveToken(_ token: String) -> Bool {
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              let directoryURL,
-              let tokenURL,
-              let data = trimmed.data(using: .utf8)
+    static func saveSession(_ session: AutoDLSession, directory: URL? = nil) -> Bool {
+        guard !session.token.isEmpty,
+              let directoryURL = directory ?? Self.directoryURL,
+              let data = try? JSONEncoder().encode(session)
         else { return false }
+        let tokenURL = directoryURL.appendingPathComponent("session.token")
 
         do {
             try fileManager.createDirectory(
@@ -55,8 +48,9 @@ enum TokenStore {
         }
     }
 
-    static func deleteToken() {
-        guard let tokenURL else { return }
+    static func deleteToken(directory: URL? = nil) {
+        guard let directory = directory ?? directoryURL else { return }
+        let tokenURL = directory.appendingPathComponent("session.token")
         try? fileManager.removeItem(at: tokenURL)
     }
 }

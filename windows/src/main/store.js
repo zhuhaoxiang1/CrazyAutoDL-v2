@@ -7,10 +7,10 @@ const { app, safeStorage } = require('electron');
 const DEFAULTS = {
   version: 1,
   autoStartEnabled: false,
+  monitoringPaused: false,
   pollInterval: 15,
   lowBalanceThreshold: 20,
   selectedInstanceId: null,
-  lastUpdateCheckAt: null,
   auth: { token: null, encryption: null, savedAt: null },
 };
 
@@ -26,6 +26,7 @@ class Store {
       const parsed = JSON.parse(raw);
       const merged = { ...DEFAULTS, ...parsed, auth: { ...DEFAULTS.auth, ...(parsed.auth || {}) } };
       merged.autoStartEnabled = Boolean(merged.autoStartEnabled);
+      merged.monitoringPaused = Boolean(merged.monitoringPaused);
       merged.pollInterval = clampNumber(merged.pollInterval, 8, 120, 15);
       merged.lowBalanceThreshold = clampNumber(merged.lowBalanceThreshold, 1, 10000, 20);
       merged.selectedInstanceId =
@@ -36,7 +37,9 @@ class Store {
     }
   }
 
-  save() {
+  // Returns whether the settings reached disk. Failures are also reported through `onSaveError` so the UI can say so
+  // instead of silently reverting on the next launch; credential paths pass `silent` and report on their own.
+  save({ silent = false } = {}) {
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       const temp = `${this.file}.tmp`;
@@ -47,13 +50,25 @@ class Store {
       } catch {
         // Windows does not implement POSIX modes; userData is already per-user.
       }
+      return true;
     } catch (error) {
       console.error('[store] failed to persist settings:', error);
+      if (!silent && typeof this.onSaveError === 'function') this.onSaveError(error);
+      return false;
     }
   }
 
   get pollingInterval() {
     return this.data.pollInterval;
+  }
+
+  get monitoringPaused() {
+    return this.data.monitoringPaused;
+  }
+
+  setMonitoringPaused(paused) {
+    this.data.monitoringPaused = Boolean(paused);
+    return this.save();
   }
 
   get autoStartEnabled() {
@@ -90,18 +105,6 @@ class Store {
     this.save();
   }
 
-  get lastUpdateCheckAt() {
-    const value = this.data.lastUpdateCheckAt;
-    if (!value) return null;
-    const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? null : date;
-  }
-
-  setLastUpdateCheckAt(date) {
-    this.data.lastUpdateCheckAt = date ? new Date(date).toISOString() : null;
-    this.save();
-  }
-
   getToken() {
     const auth = this.data.auth || {};
     if (!auth.token) return null;
@@ -134,18 +137,33 @@ class Store {
       }
     }
 
+    const previous = this.data.auth;
     this.data.auth = {
       token: encoded,
       encryption,
       savedAt: new Date().toISOString(),
     };
-    this.save();
-    return true;
+    if (this.save({ silent: true })) return true;
+    this.data.auth = previous;
+    return false;
   }
 
+  // True only when no copy of the token is left on disk. If rewriting the settings file fails, fall back to removing
+  // the file outright: losing settings is better than keeping a credential the user just signed out of.
   deleteToken() {
     this.data.auth = { token: null, encryption: null, savedAt: null };
-    this.save();
+    if (this.save({ silent: true })) return true;
+    try {
+      fs.rmSync(this.file, { force: true });
+      fs.rmSync(`${this.file}.tmp`, { force: true });
+    } catch (error) {
+      console.error('[store] failed to remove settings file:', error);
+    }
+    try {
+      return !JSON.parse(fs.readFileSync(this.file, 'utf8')).auth?.token;
+    } catch (error) {
+      return error && error.code === 'ENOENT';
+    }
   }
 
   get tokenSavedAt() {

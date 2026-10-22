@@ -1,7 +1,5 @@
 'use strict';
 
-const REPO_URL = 'https://github.com/A2ureeE/CrazyAutoDL';
-const AUTHOR_URL = 'https://github.com/A2ureeE';
 const INSTANCE_CONSOLE_URL = 'https://www.autodl.com/console/instance/list';
 const BILLING_CONSOLE_URL = 'https://www.autodl.com/console/bill';
 
@@ -29,18 +27,15 @@ const els = {
   mainScroll: document.getElementById('main-scroll'),
   nav: document.getElementById('nav'),
   navCount: document.getElementById('nav-instance-count'),
-  updateBadge: document.getElementById('settings-update-badge'),
   toastRoot: document.getElementById('toast-root'),
   titlebarStatus: document.getElementById('titlebar-status'),
   titlebarDemo: document.getElementById('titlebar-demo'),
-  sidebarVersion: document.getElementById('sidebar-version'),
 };
 
 let state = null;
 let section = 'dashboard';
 let billingRange = 14;
 let lastEngineSignature = '';
-let lastUpdateSignature = '';
 let pendingRender = false;
 let hasRendered = false;
 
@@ -113,6 +108,9 @@ function handleClick(event) {
     case 'power-off':
       confirmPowerOff(trigger.dataset.id || '');
       break;
+    case 'toggle-monitoring':
+      window.hunao.setMonitoringPaused(!(state && state.monitoringPaused));
+      break;
     case 'toggle-auto-start':
       window.hunao.setAutoStart(!(state && state.autoStartEnabled));
       break;
@@ -125,33 +123,12 @@ function handleClick(event) {
     case 'set-range':
       setBillingRange(Number(trigger.dataset.range));
       break;
-    case 'update-check':
-      window.hunao.updateCheck();
-      break;
-    case 'update-download':
-      window.hunao.updateDownload();
-      break;
-    case 'update-install':
-      window.hunao.updateInstall();
-      break;
-    case 'open-repo':
-      window.hunao.openExternal(REPO_URL);
-      break;
-    case 'open-releases':
-      window.hunao.openExternal(`${REPO_URL}/releases`);
-      break;
-    case 'open-author':
-      window.hunao.openExternal(AUTHOR_URL);
-      break;
     case 'open-console':
     case 'open-instance-console':
       window.hunao.openExternal(INSTANCE_CONSOLE_URL);
       break;
     case 'open-billing-console':
       window.hunao.openExternal(BILLING_CONSOLE_URL);
-      break;
-    case 'release-page':
-      openReleasePage();
       break;
     case 'copy-ssh':
     case 'copy-jupyter':
@@ -209,7 +186,6 @@ function handleKeydown(event) {
 function engineSignature(value) {
   const clone = { ...value };
   delete clone.createdAt;
-  delete clone.update;
   delete clone.platform;
   return JSON.stringify(clone);
 }
@@ -220,11 +196,8 @@ function handleIncomingState(next) {
   state = next;
 
   const nextEngineSignature = engineSignature(next);
-  const nextUpdateSignature = JSON.stringify(next.update || null);
   const engineChanged = !previous || nextEngineSignature !== lastEngineSignature;
-  const updateChanged = nextUpdateSignature !== lastUpdateSignature;
   lastEngineSignature = nextEngineSignature;
-  lastUpdateSignature = nextUpdateSignature;
 
   document.body.classList.toggle('auth-mode', next.phase !== 'signedIn');
   updateChrome();
@@ -240,8 +213,6 @@ function handleIncomingState(next) {
     if (previous && previous.phase !== 'signedIn' && next.phase === 'signedIn' && section === 'billing') {
       window.hunao.refreshBilling(false);
     }
-  } else if (updateChanged) {
-    updateUpdateCard();
   }
 }
 
@@ -260,16 +231,7 @@ function updateChrome() {
 
   const instanceCount = Array.isArray(state.instances) ? state.instances.length : 0;
   if (els.navCount) els.navCount.textContent = String(instanceCount);
-  if (els.sidebarVersion) els.sidebarVersion.textContent = `v${state.version || '1.2.0'}`;
   if (els.titlebarDemo) els.titlebarDemo.hidden = !state.isDemo;
-
-  const update = state.update;
-  if (els.updateBadge) {
-    const phase = update && update.phase;
-    const visible = phase === 'available' || phase === 'readyToInstall';
-    els.updateBadge.hidden = !visible;
-    els.updateBadge.textContent = phase === 'readyToInstall' ? 'READY' : 'NEW';
-  }
 
   const status = els.titlebarStatus;
   if (!status) return;
@@ -281,6 +243,9 @@ function updateChrome() {
   } else if (state.phase === 'signedIn') {
     if (state.isDemo) {
       text = '演示模式 · 本地数据';
+    } else if (state.monitoringPaused) {
+      text = '监控已暂停';
+      status.classList.add('is-offline');
     } else if (state.isRefreshing) {
       text = '正在同步…';
       status.classList.add('is-busy');
@@ -344,12 +309,6 @@ function renderView() {
 
 function afterRender() {
   if (section === 'billing') attachChartHover();
-}
-
-function updateUpdateCard() {
-  if (!state || state.phase !== 'signedIn' || section !== 'settings') return;
-  const host = document.getElementById('update-card-host');
-  if (host) host.innerHTML = updateCardInner(state.update);
 }
 
 // -------------------------------------------------------------- primitives
@@ -568,9 +527,11 @@ function dashboardView() {
   const selected = state.selectedInstance;
   const instances = state.instances || [];
 
+  const paused = Boolean(state.monitoringPaused);
   const actions = `
     ${balanceChip()}
     ${syncChip(state.isRefreshing)}
+    <button class="btn ${paused ? 'primary' : 'ghost'} sm" type="button" data-action="toggle-monitoring" title="${paused ? '恢复后台轮询与提醒' : '暂停后台轮询、提醒与自动开机'}">${icon(paused ? 'play' : 'stop')}${paused ? '恢复监控' : '暂停监控'}</button>
     ${iconButton('refresh', 'refresh', state.isRefreshing, '立即刷新')}
   `;
 
@@ -579,7 +540,7 @@ function dashboardView() {
       eyebrow: 'Command Center',
       date: state.todayLabel,
       title: '监控台',
-      badge: pill(instances.length === 0 ? '等待实例' : state.isRefreshing ? '同步中' : '实时监控', instances.length === 0 ? 'amber' : 'mint'),
+      badge: paused ? pill('监控已暂停', 'amber') : pill(instances.length === 0 ? '等待实例' : state.isRefreshing ? '同步中' : '实时监控', instances.length === 0 ? 'amber' : 'mint'),
       subtitle: '哎呀，这简直是胡！闹！',
       actions,
     })}
@@ -634,6 +595,8 @@ function sentinelCard() {
             </div>
           </div>
           ${slotStrip(instance)}`
+        : state.targetLost
+        ? emptyState('instances', '监控目标已消失', `「${state.targetLost.name}」不在实例列表中，自动开机已暂停。请在右侧“监控目标”中重新选择。`)
         : emptyState('instances', '还没有可监控的实例', '在 AutoDL 控制台创建实例后，这里会显示目标主机的空闲 GPU。', `<button class="btn primary sm" type="button" data-action="open-console">${icon('external')}打开 AutoDL 控制台</button>`)
     }
   </section>`;
@@ -740,8 +703,10 @@ function targetCard() {
   const selected = state.selectedInstance;
   const instances = state.instances || [];
 
-  const options = instances
-    .map((item) => `<option value="${esc(item.id)}" ${item.id === state.selectedInstanceId ? 'selected' : ''}>${esc(item.name)}</option>`)
+  const lost = state.targetLost;
+  const options = (lost ? '<option value="" selected disabled>请重新选择监控目标</option>' : '')
+    + instances
+    .map((item) => `<option value="${esc(item.id)}" ${!lost && item.id === state.selectedInstanceId ? 'selected' : ''}>${esc(item.name)}</option>`)
     .join('');
 
   return `<section class="card mini-card glow-aqua">
@@ -767,6 +732,14 @@ function targetCard() {
           <div class="target-bottom">
             <span class="mono" title="${esc(selected.machineLabel)}">${esc(selected.machineLabel)}</span>
             <button class="btn ghost sm" type="button" data-action="nav" data-section="instances">管理实例</button>
+          </div>`
+        : lost
+        ? `<p class="target-name">目标已消失</p>
+          <p class="target-meta">${esc(lost.name)} 不在实例列表中</p>
+          <p class="target-resource">自动开机已暂停，请在右上角重新选择监控目标</p>
+          <div class="target-bottom">
+            <span class="mono">AutoDL 控制台</span>
+            <button class="btn ghost sm" type="button" data-action="open-console">打开</button>
           </div>`
         : `<p class="target-name">等待选择</p>
           <p class="target-meta">前往 AutoDL 创建实例</p>
@@ -931,7 +904,7 @@ function statCard(symbol, label, value, suffix, tint, extraClass = '') {
 
 function instanceCard(instance) {
   const isTarget = instance.id === state.selectedInstanceId;
-  const acting = state.actionInstanceId === instance.id;
+  const acting = state.actionInstanceId === instance.id || (state.busyInstanceIds || []).includes(instance.id);
   const blocked = acting || ['starting', 'stopping', 'unknown'].includes(instance.state);
   const running = instance.state === 'running';
   const soon = releaseSoon(instance.releaseCountdown);
@@ -984,7 +957,6 @@ function instanceCard(instance) {
     </div>
     <div class="instance-actions">
       ${!isTarget ? `<button class="btn ghost" type="button" data-action="select-target" data-id="${esc(instance.id)}">${icon('scope')}设为目标</button>` : ''}
-      <button class="btn ghost" type="button" data-action="open-instance-console" title="打开 AutoDL 控制台，在网页中手动确认释放">${icon('trash')}释放</button>
       ${powerButton}
     </div>
   </article>`;
@@ -1298,9 +1270,7 @@ function updateChartHover(label, amount) {
 // ---------------------------------------------------------------- settings
 
 function settingsView() {
-  const update = state.update;
-  const actions = `<span class="version-pill">v${esc(state.version || '1.2.0')}</span>
-    <button class="btn ghost sm" type="button" data-action="open-repo">${icon('star', 'icon star-fill')}GitHub</button>`;
+  const actions = '';
 
   return `<div class="page">
     ${pageHeader({
@@ -1308,203 +1278,14 @@ function settingsView() {
       tint: 'violet',
       title: '设置',
       badge: pill(state.isDemo ? '演示模式' : '本地守护', state.isDemo ? 'amber' : 'mint'),
-      subtitle: '调整检查节奏、通知方式、应用更新与账户连接。',
+      subtitle: '调整检查节奏、通知方式与账户连接。',
       actions,
     })}
     <div class="settings-grid">
-      <section class="card update-card span-2" id="update-card-host">${updateCardInner(update)}</section>
       ${monitoringCard()}
       ${accountCard()}
-      ${aboutCard()}
     </div>
   </div>`;
-}
-
-function updateCardInner(update) {
-  const u = update || {};
-  const phase = u.phase || 'idle';
-  const release = u.release || null;
-  const failed = phase === 'failed';
-  const ready = phase === 'readyToInstall';
-  const progress = phase === 'downloading' ? clamp01(u.progress) : ready ? 1 : 0;
-  const percent = Math.round(progress * 100);
-  const sideSymbol =
-    failed ? 'alert' : phase === 'upToDate' ? 'check' : ready || phase === 'available' ? 'download' : 'refresh';
-  const showNotes = Boolean(release) && ['available', 'downloading', 'readyToInstall', 'installing', 'failed'].includes(phase);
-  const showProgress = ['downloading', 'readyToInstall', 'installing'].includes(phase);
-  const showStar = Boolean(release) && ['available', 'downloading', 'readyToInstall', 'installing', 'failed'].includes(phase);
-
-  return `<div class="update-top">
-      <div class="update-main">
-        <span class="card-eyebrow tint-mint">Updates</span>
-        <div class="update-title-row">
-          <h2>版本更新</h2>
-          <span class="version-pill">当前 v${esc(u.currentVersion || state.version || '1.2.0')}</span>
-          ${phase === 'upToDate' ? '<span class="update-badge"><i class="dot"></i>已是最新</span>' : ''}
-          ${failed ? `<span class="update-badge" style="color:var(--rose)"><i class="dot" style="background:var(--rose)"></i>需要处理</span>` : ''}
-        </div>
-        <p class="update-sub"><strong style="color:var(--text-2);font-weight:600">${esc(updateHeadline(u))}</strong><br />${esc(
-          updateSubtitle(u)
-        )}</p>
-        <div class="update-actions">${updateActions(u)}</div>
-        <div class="update-meta-row">
-          <span>${icon('shield')}安装包完整性自动校验</span>
-          <span>${icon('clock')}${u.lastCheckedLabel ? `检查于 ${esc(u.lastCheckedLabel)}` : '尚未检查'}</span>
-          <span>${icon('github')}GitHub Releases</span>
-          ${u.isDemo ? `<span>${icon('info')}演示模式不请求网络</span>` : ''}
-          ${u.supported === false ? `<span>${icon('info')}仅安装版支持应用内更新</span>` : ''}
-        </div>
-      </div>
-      <div class="update-side ${failed ? 'is-amber' : ''}">${icon(sideSymbol)}</div>
-    </div>
-    ${showNotes ? releaseNotes(release) : ''}
-    ${
-      showProgress
-        ? `<div class="update-progress">
-            <div class="progress-head">
-              <span>${phase === 'downloading' ? '下载进度' : phase === 'readyToInstall' ? '安装包已就绪' : '正在替换应用'}</span>
-              <strong>${phase === 'downloading' ? `${percent}%` : phase === 'readyToInstall' ? '100%' : '即将重启'}</strong>
-            </div>
-            <div class="progress-track"><div class="progress-fill" style="width:${phase === 'installing' ? 100 : percent}%"></div></div>
-            <div class="progress-meta">
-              <span>${esc(progressFootnote(u, release, phase))}</span>
-              <span>${u.lastCheckedLabel ? `检查于 ${esc(u.lastCheckedLabel)}` : ''}</span>
-            </div>
-          </div>`
-        : ''
-    }
-    ${failed && u.error ? `<div class="update-error">${esc(u.error)}</div>` : ''}
-    ${
-      showStar
-        ? `<div class="star-banner">
-            <span class="star-banner-icon">${icon('star', 'icon star-fill')}</span>
-            <div class="star-banner-copy">
-              <strong>${esc(starHeadline(phase))}</strong><br />
-              <span style="font-size:8.5px;color:var(--text-3)">开源免费 · 每颗 Star 都是作者 A2ureeE 持续更新的动力</span>
-            </div>
-            <button class="btn primary sm" type="button" data-action="open-repo">${icon('star', 'icon star-fill')}点个 Star</button>
-          </div>`
-        : ''
-    }`;
-}
-
-function releaseNotes(release) {
-  const notes = (release.notes || '').trim();
-  const asset = release.assetName ? ` · ${release.assetName}` : '';
-  return `<div class="release-notes" title="${esc(release.assetName || '')}">${esc(
-    `v${release.version} 更新内容${asset}\n\n${notes || '本次更新暂无详细说明。'}`
-  )}</div>`;
-}
-
-function updateHeadline(u) {
-  switch (u.phase) {
-    case 'checking':
-      return '正在检查新版本…';
-    case 'upToDate':
-      return '已是最新版本';
-    case 'available':
-      return `发现新版本 v${u.release ? u.release.version : ''}`;
-    case 'downloading':
-      return `正在下载 v${u.release ? u.release.version : ''}`;
-    case 'readyToInstall':
-      return '更新已就绪，等待重启';
-    case 'installing':
-      return '正在安装更新…';
-    case 'failed':
-      return '更新未完成';
-    default:
-      return '更新检测已就绪';
-  }
-}
-
-function updateSubtitle(u) {
-  if (u.isDemo) {
-    if (u.phase === 'idle' || u.phase === 'upToDate') return '演示模式不会请求 GitHub 检查更新。';
-  }
-  if (u.supported === false && (u.phase === 'idle' || u.phase === 'upToDate')) {
-    return '应用内更新仅在打包后的安装版中可用。';
-  }
-  switch (u.phase) {
-    case 'checking':
-      return '正在连接 GitHub Releases 获取最新版本信息。';
-    case 'upToDate':
-      return `当前 v${u.currentVersion} 已是最新版本${
-        u.lastCheckedLabel ? ` · 检查于 ${u.lastCheckedLabel}` : ''
-      }。`;
-    case 'available':
-      return '下载、校验和安装都在应用内完成，无需打开 GitHub。';
-    case 'downloading':
-      return '下载完成后会校验安装包完整性，再提示你重启安装。';
-    case 'readyToInstall':
-      return '安装包已下载完成，重启后会替换旧版本并自动重新打开。';
-    case 'installing':
-      return '胡闹AutoDL 即将退出，更新完成后会自动重新启动。';
-    case 'failed':
-      return '可以重试，或前往 GitHub 发布页手动下载安装包。';
-    default:
-      return '每 24 小时自动检查一次，也可以随时手动检查。';
-  }
-}
-
-function updateActions(u) {
-  const releaseButton = u.release
-    ? `<button class="btn ghost sm" type="button" data-action="release-page">${icon('external')}发布页</button>`
-    : '';
-
-  switch (u.phase) {
-    case 'checking':
-      return `<span class="update-badge"><span class="spinner"></span>检查中…</span>${releaseButton}`;
-    case 'downloading':
-      return `<span class="update-badge"><span class="spinner"></span>下载中 ${Math.round(clamp01(u.progress) * 100)}%</span>${releaseButton}`;
-    case 'installing':
-      return `<span class="update-badge"><span class="spinner"></span>即将重启…</span>`;
-    case 'available':
-      return `<button class="btn primary sm" type="button" data-action="update-download">${icon('download')}下载更新</button>${releaseButton}`;
-    case 'readyToInstall':
-      return `<button class="btn primary sm" type="button" data-action="update-install">${icon('refresh')}重启并安装</button>${releaseButton}`;
-    case 'failed':
-      return u.release
-        ? `<button class="btn primary sm" type="button" data-action="update-download">${icon('refresh')}重新下载</button>${releaseButton}`
-        : `<button class="btn primary sm" type="button" data-action="update-check">${icon('refresh')}重新检查</button>`;
-    default:
-      return `<button class="btn sm" type="button" data-action="update-check">${icon('refresh')}检查更新</button>${releaseButton}`;
-  }
-}
-
-function progressFootnote(u, release, phase) {
-  if (phase === 'downloading') {
-    return `${formatBytes(u.transferred)} / ${formatBytes(u.total)} · ${formatSpeed(u.bytesPerSecond)} · 安装包仅保存到本机`;
-  }
-  if (phase === 'readyToInstall') {
-    return `${(release && release.sizeLabel) || formatBytes(u.total)} · 已通过完整性校验 · 重启后替换当前应用`;
-  }
-  return '应用退出后自动完成安装并重新启动';
-}
-
-function starHeadline(phase) {
-  switch (phase) {
-    case 'available':
-      return '发现新版本，顺手给胡闹AutoDL 点个 Star 吧';
-    case 'downloading':
-      return '更新下载中，点个 Star 支持作者';
-    case 'readyToInstall':
-      return '更新已就绪，点个 Star 再重启';
-    case 'installing':
-      return '正在安装更新，感谢你的 Star';
-    case 'failed':
-      return '更新遇到问题，也可以去 GitHub 看看';
-    default:
-      return '喜欢胡闹AutoDL？去 GitHub 点个 Star 吧';
-  }
-}
-
-function openReleasePage() {
-  const release = state && state.update && state.update.release;
-  if (release && release.pageURL) {
-    window.hunao.openExternal(release.pageURL);
-    return;
-  }
-  window.hunao.openExternal(`${REPO_URL}/releases`);
 }
 
 function monitoringCard() {
@@ -1578,32 +1359,9 @@ function accountCard() {
     <div class="account-row">${icon('clock')}<span>登录时间</span><strong>${esc(formatDateTime(state.signedInAt))}</strong></div>
     <div class="account-row">${icon('instances')}<span>实例数量</span><strong>${(state.instances || []).length} 台</strong></div>
     <div class="account-row">${icon('shield')}<span>凭证存储</span><strong>${state.isDemo ? '演示数据' : '本机 DPAPI 加密'}</strong></div>
-    <div class="account-row">${icon('scope')}<span>应用内更新</span><strong>${state.update && state.update.supported ? '已启用' : '安装版可用'}</strong></div>
     <div style="margin-top:14px">
       <button class="btn danger block" type="button" data-action="logout">${icon('logout')}退出 AutoDL 登录</button>
     </div>
-  </section>`;
-}
-
-function aboutCard() {
-  return `<section class="card settings-card span-2">
-    <div class="settings-card-head">
-      <div class="card-heading">
-        <span class="card-eyebrow tint-aqua">About</span>
-        <h2 class="card-title">关于胡闹AutoDL</h2>
-      </div>
-      ${icon('info')}
-    </div>
-    <div class="account-row">${icon('github')}<span>作者</span><strong>A2ureeE</strong></div>
-    <div class="account-row">${icon('download')}<span>版本</span><strong>v${esc(state.version || '1.2.0')} · Windows</strong></div>
-    <div class="account-row">${icon('shield')}<span>数据来源</span><strong>AutoDL 官方接口</strong></div>
-    <div class="about-links">
-      <button class="btn ghost sm" type="button" data-action="open-repo">${icon('github')}GitHub 仓库</button>
-      <button class="btn ghost sm" type="button" data-action="open-releases">${icon('download')}发布页</button>
-      <button class="btn ghost sm" type="button" data-action="open-author">${icon('external')}作者主页</button>
-      <button class="btn primary sm" type="button" data-action="open-repo">${icon('star', 'icon star-fill')}点个 Star</button>
-    </div>
-    <p class="about-note">胡闹AutoDL 仅通过 AutoDL 官方接口读取实例、显卡与账单数据。Token 保存在本机（Windows 使用 DPAPI 加密），不会上传到第三方服务器。自动开机需要应用保持运行，关闭窗口后会继续驻留在系统托盘。</p>
   </section>`;
 }
 

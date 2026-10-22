@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_ROOT="$(cd "$ROOT/.." && pwd)"
 BUILD_DIR="$ROOT/.build"
 DIST_DIR="$PROJECT_ROOT/dist"
-APP_NAME="胡闹AutoDL.app"
+APP_NAME="胡闹AutoDL v2.app"
 APP="$DIST_DIR/$APP_NAME"
 # Sign outside the Documents file-provider scope; it keeps re-adding FinderInfo
 # xattrs that make codesign fail with "resource fork ... not allowed".
@@ -41,7 +41,7 @@ echo "→ 签名…"
 signed=false
 for attempt in 1 2 3; do
   xattr -cr "$STAGE_APP"
-  if codesign --force --deep --sign - --identifier "com.hunao.autodl" "$STAGE_APP" >/dev/null 2>&1; then
+  if codesign --force --deep --sign - --identifier "com.hunao.autodl.v2" "$STAGE_APP" >/dev/null 2>&1; then
     xattr -cr "$STAGE_APP"
     if codesign --verify --deep --strict "$STAGE_APP" 2>/dev/null; then
       signed=true

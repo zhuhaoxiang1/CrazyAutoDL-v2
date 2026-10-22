@@ -5,7 +5,8 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            AuroraBackground()
+            AppTheme.pageBackground
+                .ignoresSafeArea()
 
             content
 
@@ -15,10 +16,10 @@ struct RootView: View {
             MenuBarBridge()
                 .frame(width: 0, height: 0)
         }
-        .frame(minWidth: 1_060, minHeight: 720)
+        .frame(minWidth: 1_180, minHeight: 720)
         .preferredColorScheme(.dark)
         .environment(\.appFontScale, CGFloat(model.fontScale))
-        .animation(.smooth(duration: 0.4), value: model.phase)
+        .animation(.easeOut(duration: 0.2), value: model.phase)
         .overlay(alignment: .topTrailing) {
             if let toast = model.toast {
                 ToastBanner(toast: toast) {
@@ -30,33 +31,45 @@ struct RootView: View {
                 .zIndex(10)
             }
         }
-        .animation(.spring(response: 0.42, dampingFraction: 0.84), value: model.toast?.id)
+        .animation(.easeOut(duration: 0.2), value: model.toast?.id)
         .task {
             model.notifications.activate()
+            model.startRegionWatch()
             await model.notifications.refreshAuthorizationStatus()
-            await model.updater.autoCheckIfNeeded()
-            if model.updater.isUpdateAvailable, let release = model.updater.release {
-                model.presentToast(
-                    kind: .info,
-                    title: "发现新版本 \(release.version)",
-                    message: "打开「设置 → 版本更新」即可在应用内完成更新。"
-                )
-            }
+        }
+    }
+
+    /// `--panel-preview` shows the menu bar panel in the main window; a popover can't be screenshotted.
+    private static let panelPreview = ProcessInfo.processInfo.arguments.contains("--panel-preview")
+
+    @ViewBuilder
+    private var content: some View {
+        if Self.panelPreview {
+            QuickPanelView(onOpenDashboard: {}, onOpenConsole: {}, onRefresh: { model.refreshNow() }, onQuit: {})
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 50)
+        } else {
+            phaseContent
         }
     }
 
     @ViewBuilder
-    private var content: some View {
+    private var phaseContent: some View {
         switch model.phase {
         case .checking:
             BootView()
                 .transition(.opacity)
         case .loggedOut:
             AuthView()
-                .transition(.opacity.combined(with: .scale(scale: 0.99)))
+                .transition(.opacity)
         case .signedIn:
-            mainShell
-                .transition(.opacity.combined(with: .scale(scale: 0.995)))
+            if model.isShowingAuth {
+                AuthView()
+                    .transition(.opacity)
+            } else {
+                mainShell
+                    .transition(.opacity)
+            }
         }
     }
 
@@ -68,8 +81,8 @@ struct RootView: View {
                 switch model.selectedSection {
                 case .dashboard:
                     DashboardView()
-                case .instances:
-                    InstancesView()
+                case .market:
+                    MarketView()
                 case .billing:
                     BillingView()
                 case .settings:
@@ -77,54 +90,22 @@ struct RootView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .transition(.opacity)
         }
         .padding(.leading, 16)
         .padding(.trailing, 16)
         .padding(.top, 46)
         .padding(.bottom, 16)
-        .animation(.smooth(duration: 0.28), value: model.selectedSection)
     }
 }
 
 private struct BootView: View {
-    @State private var pulse = false
-
     var body: some View {
-        VStack(spacing: 18) {
-            ZStack {
-                Circle()
-                    .stroke(AppTheme.mint.opacity(0.12), lineWidth: 1)
-                    .frame(width: 106, height: 106)
-                    .scaleEffect(pulse ? 1.12 : 0.94)
-                    .opacity(pulse ? 0.2 : 0.7)
-
-                Circle()
-                    .stroke(
-                        AppTheme.aqua.opacity(0.24),
-                        style: StrokeStyle(lineWidth: 0.7, dash: [2, 6])
-                    )
-                    .frame(width: 82, height: 82)
-                    .rotationEffect(.degrees(pulse ? 120 : 0))
-
-                BrandMark(size: 56)
-            }
-
-            VStack(spacing: 5) {
-                Text("胡闹AutoDL")
-                    .scaledFont(size: 18, weight: .bold, design: .rounded)
-                    .foregroundStyle(AppTheme.textPrimary)
-                Text("正在唤醒 GPU 哨兵…")
-                    .scaledFont(size: 11, weight: .medium)
-                    .foregroundStyle(AppTheme.textTertiary)
-            }
+        VStack(spacing: 14) {
+            BrandMark(size: 56)
+            ProgressView()
+                .controlSize(.small)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) {
-                pulse = true
-            }
-        }
     }
 }
 
@@ -167,14 +148,7 @@ private struct ToastBanner: View {
         }
         .padding(13)
         .frame(width: 348, alignment: .leading)
-        .glassPanel(cornerRadius: 19, tint: toast.kind.tint)
-        .overlay(alignment: .topTrailing) {
-            Circle()
-                .fill(toast.kind.tint.opacity(0.14))
-                .frame(width: 90, height: 90)
-                .blur(radius: 30)
-                .offset(x: 30, y: -36)
-                .allowsHitTesting(false)
-        }
+        .panel()
+        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
     }
 }

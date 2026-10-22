@@ -32,6 +32,7 @@ final class MenuBarController: NSObject {
     private var model: AppModel?
     private var openMainWindow: (() -> Void)?
     private var cancellables = Set<AnyCancellable>()
+    private var renderedMode: Mode?
 
     private enum Mode {
         case disconnected
@@ -53,7 +54,7 @@ final class MenuBarController: NSObject {
             case .disconnected: return "等待连接"
             case .monitoring: return "监控中"
             case .running: return "运行中"
-            case .crazy: return "疯狂模式"
+            case .crazy: return "自动开机"
             }
         }
     }
@@ -66,6 +67,7 @@ final class MenuBarController: NSObject {
             let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             item.button?.imagePosition = .imageOnly
             statusItem = item
+            renderedMode = nil
         }
 
         if let button = statusItem?.button {
@@ -79,15 +81,9 @@ final class MenuBarController: NSObject {
             return
         }
         model.objectWillChange
-            .receive(on: RunLoop.main)
+            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
             .sink { [weak self] _ in
-                DispatchQueue.main.async { self?.refresh() }
-            }
-            .store(in: &cancellables)
-        model.updater.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                DispatchQueue.main.async { self?.refresh() }
+                self?.refresh()
             }
             .store(in: &cancellables)
         refresh()
@@ -106,7 +102,7 @@ final class MenuBarController: NSObject {
 
     private var currentMode: Mode {
         guard let model, model.phase == .signedIn else { return .disconnected }
-        if model.autoStartEnabled { return .crazy }
+        if model.isAnyAutoStartEnabled { return .crazy }
         if model.runningCount > 0 { return .running }
         return .monitoring
     }
@@ -115,19 +111,21 @@ final class MenuBarController: NSObject {
         guard let model, let button = statusItem?.button else { return }
         let mode = currentMode
 
-        let color = Self.color(for: mode)
-
-        let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
-            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-        if let image = NSImage(systemSymbolName: mode.symbol, accessibilityDescription: mode.label)?
-            .withSymbolConfiguration(configuration) {
-            image.isTemplate = false
-            button.image = image
+        if mode != renderedMode {
+            let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [Self.color(for: mode)]))
+            if let image = NSImage(systemSymbolName: mode.symbol, accessibilityDescription: mode.label)?
+                .withSymbolConfiguration(configuration) {
+                image.isTemplate = false
+                button.image = image
+                renderedMode = mode
+            }
         }
 
         var tooltip = "胡闹AutoDL · \(mode.label)"
         if model.phase == .signedIn {
-            tooltip += "\n\(model.runningCount)/\(model.instances.count) 台实例运行中 · 余额 \(model.balanceLabel)"
+            let account = model.hasMultipleAccounts ? "\(model.currentAccountName)：" : ""
+            tooltip += "\n\(account)\(model.runningCount)/\(model.instances.count) 台实例运行中 · 余额 \(model.balanceLabel)"
         }
         tooltip += "\n左键打开快捷面板 · 右键更多菜单"
         button.toolTip = tooltip
@@ -139,11 +137,11 @@ final class MenuBarController: NSObject {
         case .disconnected:
             return .secondaryLabelColor
         case .monitoring:
-            return dynamicColor(dark: (0.33, 0.81, 1.00), light: (0.02, 0.45, 0.72))
+            return dynamicColor(dark: (0.42, 0.65, 0.90), light: (0.02, 0.45, 0.72))
         case .running:
-            return dynamicColor(dark: (0.38, 0.98, 0.76), light: (0.00, 0.50, 0.32))
+            return dynamicColor(dark: (0.40, 0.78, 0.58), light: (0.00, 0.50, 0.32))
         case .crazy:
-            return dynamicColor(dark: (1.00, 0.65, 0.24), light: (0.84, 0.34, 0.02))
+            return dynamicColor(dark: (0.92, 0.70, 0.36), light: (0.84, 0.34, 0.02))
         }
     }
 
@@ -200,7 +198,7 @@ final class MenuBarController: NSObject {
 
         let fitted = hosting.view.fittingSize
         popover.contentViewController = hosting
-        popover.contentSize = NSSize(width: 360, height: max(240, fitted.height))
+        popover.contentSize = NSSize(width: 380, height: max(240, fitted.height))
         quickPanel = popover
 
         guard let button = statusItem?.button else { return }
@@ -221,7 +219,7 @@ final class MenuBarController: NSObject {
         contentView.layoutSubtreeIfNeeded()
         let height = contentView.fittingSize.height
         guard height > 0, abs(height - quickPanel.contentSize.height) > 0.5 else { return }
-        quickPanel.contentSize = NSSize(width: 360, height: max(240, height))
+        quickPanel.contentSize = NSSize(width: 380, height: max(240, height))
     }
 
     private func showContextMenu(for model: AppModel) {
@@ -248,8 +246,8 @@ final class MenuBarController: NSObject {
             statusLine = "未连接 · 打开窗口登录 AutoDL"
         } else if model.autoStartEnabled {
             statusLine = model.runningCount > 0
-                ? "疯狂模式 · \(model.runningCount) 台运行中"
-                : "疯狂模式 · 守候空闲显卡"
+                ? "自动开机 · \(model.runningCount) 台运行中"
+                : "自动开机 · 守候空闲显卡"
         } else if model.runningCount > 0 {
             statusLine = "运行中 · \(model.runningCount)/\(model.instances.count) 台实例"
         } else {
@@ -296,7 +294,7 @@ final class MenuBarController: NSObject {
 
         if model.phase == .signedIn {
             let auto = NSMenuItem(
-                title: "自动开机（疯狂模式）",
+                title: "自动开机",
                 action: #selector(toggleAutoStart),
                 keyEquivalent: ""
             )
@@ -305,7 +303,7 @@ final class MenuBarController: NSObject {
             auto.isEnabled = true
             if model.autoStartEnabled {
                 auto.attributedTitle = NSAttributedString(
-                    string: "自动开机（疯狂模式）",
+                    string: "自动开机",
                     attributes: [
                         .font: NSFont.menuFont(ofSize: 13),
                         .foregroundColor: color
@@ -313,6 +311,17 @@ final class MenuBarController: NSObject {
                 )
             }
             menu.addItem(auto)
+        }
+
+        if model.phase == .signedIn {
+            let pause = NSMenuItem(
+                title: model.monitoringPaused ? "恢复监控" : "暂停监控",
+                action: #selector(toggleMonitoringPaused),
+                keyEquivalent: ""
+            )
+            pause.target = self
+            pause.isEnabled = true
+            menu.addItem(pause)
         }
 
         let refresh = NSMenuItem(
@@ -332,36 +341,6 @@ final class MenuBarController: NSObject {
         console.target = self
         console.isEnabled = true
         menu.addItem(console)
-
-        let update = NSMenuItem(
-            title: updateMenuTitle(for: model),
-            action: #selector(checkForUpdates),
-            keyEquivalent: ""
-        )
-        update.target = self
-        update.isEnabled = !model.updater.isBusy
-        if model.updater.showsUpdateAttention {
-            update.attributedTitle = NSAttributedString(
-                string: update.title,
-                attributes: [
-                    .font: NSFont.menuFont(ofSize: 13),
-                    .foregroundColor: Self.dynamicColor(
-                        dark: (1.00, 0.76, 0.34),
-                        light: (0.72, 0.38, 0.00)
-                    )
-                ]
-            )
-        }
-        menu.addItem(update)
-
-        let star = NSMenuItem(
-            title: "GitHub · 给胡闹AutoDL 点个 Star",
-            action: #selector(openRepository),
-            keyEquivalent: ""
-        )
-        star.target = self
-        star.isEnabled = true
-        menu.addItem(star)
 
         menu.addItem(.separator())
 
@@ -398,39 +377,12 @@ final class MenuBarController: NSObject {
         model.setAutoStart(!model.autoStartEnabled)
     }
 
+    @objc private func toggleMonitoringPaused() {
+        model?.setMonitoringPaused(!(model?.monitoringPaused ?? false))
+    }
+
     @objc private func refreshNow() {
         model?.refreshNow()
-    }
-
-    @objc private func checkForUpdates() {
-        guard let model else { return }
-        model.selectedSection = .settings
-        reopenMainWindow()
-        switch model.updater.phase {
-        case .idle, .upToDate, .failed:
-            Task { await model.updater.check() }
-        default:
-            break
-        }
-    }
-
-    private func updateMenuTitle(for model: AppModel) -> String {
-        switch model.updater.phase {
-        case .available:
-            return "发现新版本 v\(model.updater.release?.version ?? "") · 去更新"
-        case .downloading:
-            return "正在下载更新 \(Int((model.updater.progress * 100).rounded()))%"
-        case .preparing:
-            return "正在校验更新安装包…"
-        case .readyToInstall:
-            return "更新已就绪 · 重启安装"
-        case .checking:
-            return "正在检查更新…"
-        case .installing:
-            return "正在安装更新…"
-        default:
-            return "检查更新…"
-        }
     }
 
     @objc private func openConsole() {
@@ -439,9 +391,6 @@ final class MenuBarController: NSObject {
         }
     }
 
-    @objc private func openRepository() {
-        AppLinks.openRepository()
-    }
 
     @objc private func quitApp() {
         NSApp.terminate(nil)

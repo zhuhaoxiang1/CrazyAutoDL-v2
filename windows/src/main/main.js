@@ -4,7 +4,6 @@ const electron = require('electron');
 const path = require('path');
 const { Store } = require('./store');
 const { Engine } = require('./engine');
-const { UpdateService } = require('./updates');
 
 const {
   app,
@@ -22,7 +21,6 @@ const {
 
 const APP_ID = 'com.hunao.autodl';
 const LOGIN_PARTITION = 'hunao-login';
-const REPO_URL = 'https://github.com/A2ureeE/CrazyAutoDL';
 const isDemo = process.argv.includes('--demo');
 const isDev = !app.isPackaged;
 
@@ -33,7 +31,6 @@ let loginWindow = null;
 let tray = null;
 let store = null;
 let engine = null;
-let updater = null;
 let loginPoller = null;
 let lastAttemptedToken = null;
 let isQuitting = false;
@@ -94,7 +91,6 @@ async function initialize() {
     notify: showNotification,
     onSessionCleared: clearLoginSession,
   });
-  updater = new UpdateService({ store, demoMode: isDemo });
 
   createMainWindow();
   registerIpc();
@@ -102,28 +98,8 @@ async function initialize() {
 
   engine.on('state', () => broadcast());
   engine.on('toast', (toast) => sendToRenderer('toast', toast));
-  updater.on('state', () => broadcast());
-  updater.on('notice', (notice) => sendToRenderer('toast', { id: `updater-${Date.now()}`, ...notice }));
-  updater.on('available', (state) => {
-    if (!state.userInitiated && state.release) {
-      sendToRenderer('toast', {
-        id: `update-${Date.now()}`,
-        kind: 'info',
-        title: `发现新版本 ${state.release.version}`,
-        message: '打开「设置 → 版本更新」即可在应用内完成更新。',
-      });
-    }
-  });
-  updater.on('ready', (state) => {
-    showNotification({
-      title: '更新已下载完成',
-      body: `胡闹AutoDL ${state.release ? state.release.version : ''} 已准备就绪，重启应用即可完成安装。`,
-      tag: 'update-ready',
-    });
-  });
 
   broadcast();
-  if (!isDemo) updater.autoCheckIfNeeded();
 }
 
 function createMainWindow() {
@@ -212,7 +188,6 @@ function currentState() {
   const state = engine ? engine.buildState() : { phase: 'checking' };
   return {
     ...state,
-    update: updater ? updater.snapshot() : null,
     loginWindowOpen: Boolean(loginWindow && !loginWindow.isDestroyed()),
     notificationsSupported: Notification.isSupported(),
     platform: process.platform,
@@ -258,6 +233,9 @@ function updateTray(state) {
       const idle = state.stock ? `${state.stock.idleGPUs} 张空闲 ${state.stock.gpuName}` : '显卡状态同步中';
       status = `${selected.name} · ${selected.stateLabel} · ${idle}`;
       tooltip = `胡闹AutoDL · ${selected.name} · ${selected.stateLabel}`;
+    } else if (state.targetLost) {
+      status = `监控目标已消失 · 自动开机已暂停`;
+      tooltip = '胡闹AutoDL · 监控目标已消失，请重新选择';
     } else {
       status = `已登录 · ${state.instances.length} 个实例`;
       tooltip = '胡闹AutoDL · 等待选择监控目标';
@@ -265,27 +243,6 @@ function updateTray(state) {
     if (state.isDemo) status = `演示模式 · ${status}`;
   }
   tray.setToolTip(tooltip);
-
-  const update = state.update || {};
-  let updateItem = { label: '检查更新…', click: () => focusAndNavigate('settings', () => updater.check({ userInitiated: true })) };
-  if (update.phase === 'checking') {
-    updateItem = { label: '正在检查更新…', enabled: false };
-  } else if (update.phase === 'downloading') {
-    updateItem = {
-      label: `正在下载更新 ${Math.round((update.progress || 0) * 100)}%`,
-      click: () => focusAndNavigate('settings'),
-    };
-  } else if (update.phase === 'available' && update.release) {
-    updateItem = {
-      label: `发现新版本 v${update.release.version} · 去更新`,
-      click: () => focusAndNavigate('settings'),
-    };
-  } else if (update.phase === 'readyToInstall' && update.release) {
-    updateItem = {
-      label: `更新 v${update.release.version} 已就绪 · 重启安装`,
-      click: () => focusAndNavigate('settings'),
-    };
-  }
 
   const template = [
     { label: '胡闹AutoDL', enabled: false },
@@ -300,6 +257,15 @@ function updateTray(state) {
       },
     },
     {
+      label: '暂停监控',
+      type: 'checkbox',
+      checked: Boolean(state.monitoringPaused),
+      enabled: phase === 'signedIn',
+      click: (item) => {
+        if (engine) engine.setMonitoringPaused(item.checked);
+      },
+    },
+    {
       label: '自动开机',
       type: 'checkbox',
       checked: Boolean(state.autoStartEnabled),
@@ -307,12 +273,6 @@ function updateTray(state) {
       click: (item) => {
         if (engine) engine.setAutoStart(item.checked);
       },
-    },
-    { type: 'separator' },
-    updateItem,
-    {
-      label: '在 GitHub 点个 Star',
-      click: () => openExternalSafe(REPO_URL),
     },
     { type: 'separator' },
     {
@@ -328,12 +288,6 @@ function updateTray(state) {
   if (signature === lastTrayMenuSignature) return;
   lastTrayMenuSignature = signature;
   tray.setContextMenu(Menu.buildFromTemplate(template));
-}
-
-function focusAndNavigate(section, beforeNavigate) {
-  showMainWindow();
-  sendToRenderer('navigate', section);
-  if (beforeNavigate) beforeNavigate();
 }
 
 function showNotification({ title, body, tag }) {
@@ -573,25 +527,16 @@ function registerIpc() {
     engine.setPollInterval(seconds);
     return true;
   });
+  ipcMain.handle('settings:monitoring-paused', (event, paused) => {
+    engine.setMonitoringPaused(Boolean(paused));
+    return true;
+  });
   ipcMain.handle('settings:low-balance', (event, value) => {
     engine.setLowBalanceThreshold(value);
     return true;
   });
   ipcMain.handle('notifications:test', () => engine.sendTestNotification());
 
-  ipcMain.handle('update:get', () => updater.snapshot());
-  ipcMain.handle('update:check', () => {
-    updater.check({ userInitiated: true });
-    return true;
-  });
-  ipcMain.handle('update:download', () => {
-    updater.download();
-    return true;
-  });
-  ipcMain.handle('update:install', () => {
-    updater.install();
-    return true;
-  });
 }
 
 function clip(value, max) {

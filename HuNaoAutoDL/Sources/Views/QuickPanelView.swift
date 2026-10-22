@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Menu bar popover: a three-second glance at the monitored instance plus the few controls worth reaching from here.
 struct QuickPanelView: View {
     @EnvironmentObject private var model: AppModel
 
@@ -9,17 +10,13 @@ struct QuickPanelView: View {
     let onQuit: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        VStack(alignment: .leading, spacing: 12) {
             header
 
             if model.phase == .signedIn {
-                statusSummary
-
-                if model.runningCount == 0 {
-                    standbyHint
-                }
-
                 targetSection
+                PanelRegionSummary(market: model.market)
+                instanceChips
                 automationSection
                 quickActions
             } else if model.phase == .checking {
@@ -30,188 +27,170 @@ struct QuickPanelView: View {
 
             footer
         }
-        .padding(15)
-        .frame(width: 360)
-        .background {
-            ZStack {
-                VisualEffectView(material: .popover)
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.035, green: 0.085, blue: 0.095).opacity(0.90),
-                        Color(red: 0.045, green: 0.045, blue: 0.095).opacity(0.92)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            }
-        }
+        .padding(14)
+        .frame(width: 380)
+        .background(AppTheme.pageBackground)
         .preferredColorScheme(.dark)
     }
 
+    // MARK: Header
+
     private var header: some View {
         HStack(spacing: 10) {
-            BrandMark(size: 33)
+            BrandMark(size: 26)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("胡闹AutoDL")
-                    .scaledFont(size: 14.5, weight: .bold, design: .rounded)
+                    .scaledFont(size: 14, weight: .bold)
                     .foregroundStyle(AppTheme.textPrimary)
                 HStack(spacing: 5) {
-                    Circle()
-                        .fill(modeTint)
-                        .frame(width: 5, height: 5)
-                        .shadow(color: modeTint.opacity(0.8), radius: 3)
-                    Text(modeLabel)
-                        .scaledFont(size: 9, weight: .semibold)
+                    Text("●")
+                        .scaledFont(size: 8)
+                        .foregroundStyle(modeTint)
+                    Text(model.hasMultipleAccounts ? "\(modeLabel) · \(model.currentAccountName)" : modeLabel)
+                        .scaledFont(size: 10.5, weight: .medium)
                         .foregroundStyle(AppTheme.textTertiary)
+                        .lineLimit(1)
                 }
             }
 
             Spacer()
 
-            Button(action: onRefresh) {
-                Image(systemName: model.isRefreshing ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
-                    .scaledFont(size: 11, weight: .semibold)
-                    .foregroundStyle(model.isRefreshing ? AppTheme.mint : AppTheme.textSecondary)
-                    .frame(width: 27, height: 27)
-                    .background(.white.opacity(0.055), in: Circle())
-            }
-            .buttonStyle(.plain)
+            squareButton(
+                symbol: model.isRefreshing ? "arrow.triangle.2.circlepath" : "arrow.clockwise",
+                tint: model.isRefreshing ? AppTheme.mint : AppTheme.textSecondary,
+                help: "立即刷新",
+                action: onRefresh
+            )
             .disabled(model.phase != .signedIn || model.isRefreshing)
-            .help("立即刷新")
 
-            Button(action: onOpenDashboard) {
-                Image(systemName: "macwindow")
-                    .scaledFont(size: 11, weight: .semibold)
-                    .foregroundStyle(AppTheme.textSecondary)
-                    .frame(width: 27, height: 27)
-                    .background(.white.opacity(0.055), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .help("打开监控台")
+            squareButton(symbol: "macwindow", tint: AppTheme.textSecondary, help: "打开监控台", action: onOpenDashboard)
         }
     }
 
-    private var statusSummary: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
+    private func squareButton(symbol: String, tint: Color, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .scaledFont(size: 11, weight: .semibold)
+                .foregroundStyle(tint)
+                .frame(width: 28, height: 28)
+                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .strokeBorder(AppTheme.border, lineWidth: 1)
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    // MARK: Target
+
+    private var targetSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("\(model.runningCount)")
-                    .scaledFont(size: 28, weight: .bold, design: .rounded)
+                    .scaledFont(size: 26, weight: .bold)
                     .foregroundStyle(model.runningCount > 0 ? AppTheme.mint : AppTheme.textPrimary)
                     .monospacedDigit()
                     .contentTransition(.numericText())
                 Text("/ \(model.instances.count) 台运行中")
-                    .scaledFont(size: 10.5, weight: .medium)
+                    .scaledFont(size: 11.5, weight: .medium)
                     .foregroundStyle(AppTheme.textSecondary)
+                if let noCard = model.current?.noCardCount, noCard > 0 {
+                    Text("· 其中 \(noCard) 台无卡")
+                        .scaledFont(size: 11.5, weight: .medium)
+                        .foregroundStyle(AppTheme.aqua)
+                }
 
                 Spacer()
 
-                HStack(spacing: 4) {
-                    Image(systemName: model.isLowBalance ? "exclamationmark.circle.fill" : "yensign.circle.fill")
-                        .scaledFont(size: 9, weight: .bold)
-                    Text(model.balanceLabel)
-                        .scaledFont(size: 10, weight: .bold, design: .rounded)
-                        .monospacedDigit()
-                }
-                .foregroundStyle(model.isLowBalance ? AppTheme.amber : AppTheme.mint.opacity(0.88))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(
-                    (model.isLowBalance ? AppTheme.amber : AppTheme.mint).opacity(0.09),
-                    in: Capsule()
-                )
+                Text(model.balance == nil ? "余额 …" : "余额 \(model.balanceLabel)")
+                    .scaledFont(size: 11.5, weight: .bold)
+                    .foregroundStyle(model.isLowBalance ? AppTheme.amber : AppTheme.mint)
+                    .monospacedDigit()
             }
 
+            Rectangle().fill(AppTheme.border).frame(height: 1)
+
             if let instance = model.selectedInstance {
-                HStack(spacing: 6) {
-                    Image(systemName: "scope")
-                        .scaledFont(size: 8.5, weight: .semibold)
-                        .foregroundStyle(AppTheme.aqua.opacity(0.8))
+                let idle = model.stock?.idleGPUs
+                let total = model.stock?.totalGPUs
+                let available = model.stock?.isAvailable == true
+
+                HStack(spacing: 8) {
+                    Text("◎")
+                        .scaledFont(size: 12, weight: .bold)
+                        .foregroundStyle(AppTheme.mint)
                     Text(instance.name)
-                        .scaledFont(size: 10, weight: .semibold)
-                        .foregroundStyle(AppTheme.textSecondary)
+                        .scaledFont(size: 12.5, weight: .semibold)
+                        .foregroundStyle(AppTheme.textPrimary)
                         .lineLimit(1)
-                    Text(instance.state.label)
-                        .scaledFont(size: 8, weight: .bold)
-                        .foregroundStyle(instance.state.tint)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(instance.state.tint.opacity(0.10), in: Capsule())
+                    StatusPill(label: instance.statusLabel, tint: instance.statusTint)
+                    Spacer(minLength: 0)
+                }
 
-                    Spacer(minLength: 4)
+                Text("\(instance.gpuName) ×\(instance.gpuCount) · \(instance.displayRegion)")
+                    .scaledFont(size: 11)
+                    .foregroundStyle(AppTheme.textTertiary)
+                    .lineLimit(1)
 
-                    Text("内存 \(instance.memoryFreeLabel) · 存储 \(instance.storageFreeLabel)")
-                        .scaledFont(size: 9.5, weight: .semibold)
-                        .foregroundStyle(AppTheme.aqua.opacity(0.82))
+                HStack(spacing: 10) {
+                    AsciiBar(
+                        fraction: slotFraction(idle: idle, total: total),
+                        cells: slotCells(total ?? instance.gpuCount),
+                        tint: available ? AppTheme.mint : AppTheme.textTertiary,
+                        size: 13
+                    )
+                    Text(idle.map { "\($0)/\(total ?? instance.gpuCount)" } ?? "待同步")
+                        .scaledFont(size: 12, weight: .bold)
+                        .foregroundStyle(available ? AppTheme.mint : AppTheme.textTertiary)
                         .monospacedDigit()
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
+                    Spacer(minLength: 0)
                 }
-                .help("\(instance.memoryDetailLabel) · \(instance.storageDetailLabel)")
 
-                if let fraction = instance.storageUsedFraction {
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(.white.opacity(0.075))
-                            Capsule()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [AppTheme.aqua.opacity(0.72), AppTheme.mint.opacity(0.82)],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
-                                    )
-                                )
-                                .frame(width: max(4, geometry.size.width * fraction))
-                        }
-                    }
-                    .frame(height: 3.5)
-                }
+                Text(model.availabilityHeadline)
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(available ? AppTheme.mint : AppTheme.textSecondary)
+                    .lineLimit(1)
+                    .help("\(instance.memoryDetailLabel) · \(instance.storageDetailLabel)")
             } else {
-                Text("还没有可监控的实例，打开监控台刷新看看。")
-                    .scaledFont(size: 9.5)
+                Text(model.lostTarget.map { "「\($0.name)」已不在实例列表中，自动开机已暂停，请在监控台重新选择。" }
+                    ?? "还没有可监控的实例，打开监控台刷新看看。")
+                    .scaledFont(size: 11)
                     .foregroundStyle(AppTheme.textTertiary)
             }
         }
         .padding(12)
-        .glassPanel(cornerRadius: 15, tint: AppTheme.aqua)
+        .panel()
     }
 
-    private var standbyHint: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "moon.zzz.fill")
-                .scaledFont(size: 10, weight: .semibold)
-                .foregroundStyle(AppTheme.amber.opacity(0.85))
-            Text("当前没有实例在运行。选好监控对象并开启自动开机，胡闹AutoDL 替你守卡。")
-                .scaledFont(size: 9.5, weight: .medium)
-                .foregroundStyle(AppTheme.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .background(AppTheme.amber.opacity(0.065), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(AppTheme.amber.opacity(0.14), lineWidth: 0.6)
-        }
+    private func slotFraction(idle: Int?, total: Int?) -> Double {
+        guard let idle, let total, total > 0 else { return 0 }
+        return Double(idle) / Double(total)
     }
 
-    private var targetSection: some View {
+    private func slotCells(_ cards: Int) -> Int {
+        let count = max(cards, 1)
+        return count <= 8 ? count * 2 : min(count, 24)
+    }
+
+    // MARK: Instance chips
+
+    private var instanceChips: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
-                EyebrowLabel(text: "Monitor Target", tint: AppTheme.aqua)
-                Spacer()
-                Text(model.selectedInstance == nil ? "尚未选择" : "点选切换")
-                    .scaledFont(size: 8.5, weight: .medium)
+                Text("切换监控目标")
+                    .scaledFont(size: 10.5, weight: .semibold)
                     .foregroundStyle(AppTheme.textTertiary)
+                Spacer()
             }
 
             if model.instances.isEmpty {
                 Text("实例加载后会出现在这里。")
-                    .scaledFont(size: 9.5)
+                    .scaledFont(size: 11)
                     .foregroundStyle(AppTheme.textTertiary)
-                    .padding(.vertical, 4)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
@@ -230,59 +209,47 @@ struct QuickPanelView: View {
         return Button {
             model.selectInstance(instance.id)
         } label: {
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(instance.state.tint)
-                    .frame(width: 5, height: 5)
+            HStack(spacing: 6) {
+                Text(instance.isNoCardMode ? "◌" : "●")
+                    .scaledFont(size: 8)
+                    .foregroundStyle(instance.statusTint)
                 Text(instance.name)
-                    .scaledFont(size: 10, weight: .semibold)
+                    .scaledFont(size: 11, weight: .semibold)
                     .foregroundStyle(isSelected ? AppTheme.textPrimary : AppTheme.textSecondary)
                     .lineLimit(1)
                 if isSelected {
-                    Image(systemName: "checkmark")
-                        .scaledFont(size: 7, weight: .bold)
+                    Text("✓")
+                        .scaledFont(size: 10, weight: .bold)
                         .foregroundStyle(AppTheme.mint)
                 }
             }
             .padding(.horizontal, 9)
-            .padding(.vertical, 6)
+            .frame(height: 26)
             .background(
-                isSelected ? AppTheme.mint.opacity(0.12) : Color.white.opacity(0.045),
-                in: Capsule()
+                isSelected ? AppTheme.mint.opacity(0.10) : Color.white.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 3, style: .continuous)
             )
             .overlay {
-                Capsule()
-                    .strokeBorder(
-                        isSelected ? AppTheme.mint.opacity(0.30) : .white.opacity(0.065),
-                        lineWidth: 0.7
-                    )
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .strokeBorder(isSelected ? AppTheme.mint.opacity(0.5) : AppTheme.border, lineWidth: 1)
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(instance.gpuName) × \(instance.gpuCount) · 内存剩余 \(instance.memoryFreeLabel) · 存储剩余 \(instance.storageFreeLabel)")
+        .help("\(instance.gpuName) × \(instance.gpuCount) · \(instance.displayRegion)\n内存剩余 \(instance.memoryFreeLabel) · 存储剩余 \(instance.storageFreeLabel)")
     }
+
+    // MARK: Auto start
 
     private var automationSection: some View {
         HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(
-                        (model.autoStartEnabled ? AppTheme.mint : Color.white)
-                            .opacity(model.autoStartEnabled ? 0.12 : 0.055)
-                    )
-                    .frame(width: 30, height: 30)
-                Image(systemName: model.autoStartEnabled ? "flame.fill" : "power")
-                    .scaledFont(size: 11, weight: .bold)
-                    .foregroundStyle(model.autoStartEnabled ? AppTheme.mint : AppTheme.textSecondary)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("自动开机（疯狂模式）")
-                    .scaledFont(size: 11.5, weight: .semibold)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("自动开机")
+                    .scaledFont(size: 12.5, weight: .semibold)
                     .foregroundStyle(AppTheme.textPrimary)
                 Text(model.autoStartEnabled ? "空闲显卡一出现就自动抢占" : "只提醒，不自动开机")
-                    .scaledFont(size: 8.5)
-                    .foregroundStyle(AppTheme.textTertiary)
+                    .scaledFont(size: 11)
+                    .foregroundStyle(model.autoStartEnabled ? AppTheme.mint.opacity(0.85) : AppTheme.textTertiary)
                     .lineLimit(1)
             }
 
@@ -292,26 +259,38 @@ struct QuickPanelView: View {
                 model.setAutoStart(!model.autoStartEnabled)
             }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 9)
-        .glassPanel(cornerRadius: 14, tint: model.autoStartEnabled ? AppTheme.mint : .white, interactive: true)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .panel()
     }
+
+    // MARK: Actions
 
     private var quickActions: some View {
         HStack(spacing: 7) {
             if let instance = model.selectedInstance,
                instance.state.isPoweredOff,
-               model.actionInstanceID != instance.id {
+               !model.isBusy(instance.id) {
                 quickButton(title: "立即开机", symbol: "play.fill", tint: AppTheme.mint, prominent: true) {
                     model.powerOn(instance: instance)
                 }
             }
 
-            quickButton(title: "刷新状态", symbol: "arrow.clockwise", tint: .white) {
+            if let instance = model.selectedInstance,
+               instance.state.isPoweredOff,
+               !model.isBusy(instance.id) {
+                quickButton(title: "无卡开机", symbol: "play", tint: AppTheme.aqua) {
+                    if InstancePowerButton.confirmNoCardIfNeeded(instanceName: instance.name) {
+                        model.powerOn(instance: instance, noCard: true)
+                    }
+                }
+            }
+
+            quickButton(title: "刷新", symbol: "arrow.clockwise", tint: .white) {
                 onRefresh()
             }
 
-            quickButton(title: "AutoDL 控制台", symbol: "arrow.up.right", tint: .white) {
+            quickButton(title: "控制台", symbol: "arrow.up.right", tint: .white) {
                 onOpenConsole()
             }
         }
@@ -324,38 +303,37 @@ struct QuickPanelView: View {
         prominent: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
+        let shape = RoundedRectangle(cornerRadius: 3, style: .continuous)
+        return Button(action: action) {
+            HStack(spacing: 5) {
                 if model.isRefreshing && symbol == "arrow.clockwise" {
                     ProgressView()
                         .controlSize(.mini)
                         .scaleEffect(0.65)
                 } else {
                     Image(systemName: symbol)
-                        .scaledFont(size: 8, weight: .bold)
+                        .scaledFont(size: 10, weight: .bold)
                 }
                 Text(title)
-                    .scaledFont(size: 9.5, weight: .semibold)
+                    .scaledFont(size: 11, weight: .semibold)
                     .lineLimit(1)
             }
-            .foregroundStyle(prominent ? Color.black.opacity(0.82) : AppTheme.textSecondary)
+            .foregroundStyle(prominent ? Color.black.opacity(0.85) : AppTheme.textSecondary)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 7)
-            .background(
-                prominent ? tint.opacity(0.88) : Color.white.opacity(0.045),
-                in: Capsule()
-            )
+            .frame(height: 30)
+            .background(prominent ? tint : Color.white.opacity(0.04), in: shape)
             .overlay {
-                Capsule()
-                    .strokeBorder(
-                        prominent ? .white.opacity(0.35) : .white.opacity(0.07),
-                        lineWidth: 0.7
-                    )
+                if !prominent {
+                    shape.strokeBorder(AppTheme.border, lineWidth: 1)
+                }
             }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(model.isRefreshing && symbol == "arrow.clockwise")
     }
+
+    // MARK: Signed out
 
     private var checkingCard: some View {
         HStack(spacing: 9) {
@@ -363,21 +341,21 @@ struct QuickPanelView: View {
                 .controlSize(.small)
                 .tint(AppTheme.aqua)
             Text("正在连接 AutoDL…")
-                .scaledFont(size: 11, weight: .medium)
+                .scaledFont(size: 12, weight: .medium)
                 .foregroundStyle(AppTheme.textSecondary)
             Spacer()
         }
         .padding(13)
-        .glassPanel(cornerRadius: 15, tint: AppTheme.aqua)
+        .panel()
     }
 
     private var disconnectedCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 9) {
             Text("还没有连接 AutoDL")
-                .scaledFont(size: 12.5, weight: .semibold)
+                .scaledFont(size: 13, weight: .semibold)
                 .foregroundStyle(AppTheme.textPrimary)
             Text("打开主窗口完成登录，就能在这里快速选择目标、开关自动开机。")
-                .scaledFont(size: 9.5)
+                .scaledFont(size: 11)
                 .foregroundStyle(AppTheme.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
             Button(action: onOpenDashboard) {
@@ -387,54 +365,39 @@ struct QuickPanelView: View {
             .buttonStyle(ActionButtonStyle(tint: AppTheme.mint, prominent: true))
         }
         .padding(13)
-        .glassPanel(cornerRadius: 15, tint: AppTheme.mint)
+        .panel()
     }
+
+    // MARK: Footer
 
     private var footer: some View {
         HStack(spacing: 8) {
             Button(action: onOpenDashboard) {
-                HStack(spacing: 4) {
+                HStack(spacing: 5) {
                     Text("打开监控台")
-                    Image(systemName: "arrow.up.right")
-                        .scaledFont(size: 7.5, weight: .bold)
+                    Text("↗")
                 }
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(ActionButtonStyle(tint: AppTheme.aqua))
 
-            Button(action: AppLinks.openRepository) {
-                Image(systemName: "star.fill")
-                    .scaledFont(size: 10, weight: .semibold)
-                    .foregroundStyle(AppTheme.amber.opacity(0.85))
-                    .frame(width: 32, height: 30)
-                    .background(AppTheme.amber.opacity(0.07), in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .help("作者 \(AppLinks.author) · GitHub 点个 Star")
-
-            Button(action: onQuit) {
-                Image(systemName: "power")
-                    .scaledFont(size: 10, weight: .semibold)
-                    .foregroundStyle(AppTheme.textTertiary)
-                    .frame(width: 32, height: 30)
-                    .background(.white.opacity(0.045), in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .help("退出胡闹AutoDL")
+            squareButton(symbol: "power", tint: AppTheme.textTertiary, help: "退出胡闹AutoDL", action: onQuit)
 
             Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
-                .scaledFont(size: 8, weight: .medium)
+                .scaledFont(size: 10, weight: .medium)
                 .foregroundStyle(AppTheme.textTertiary.opacity(0.8))
                 .fixedSize()
         }
     }
+
+    // MARK: Mode
 
     private var modeLabel: String {
         guard model.phase == .signedIn else {
             return model.phase == .checking ? "正在连接" : "等待登录"
         }
         if model.autoStartEnabled {
-            return "疯狂模式 · 守候空闲显卡"
+            return "自动开机 · 守候空闲显卡"
         }
         if model.runningCount > 0 {
             return "运行中 · \(model.runningCount)/\(model.instances.count) 台"
@@ -447,5 +410,74 @@ struct QuickPanelView: View {
         if model.autoStartEnabled { return AppTheme.amber }
         if model.runningCount > 0 { return AppTheme.mint }
         return AppTheme.aqua
+    }
+}
+
+/// Region view in miniature: how many idle cards of the target's model its region has right now,
+/// and which alert rules currently have cards. Data comes from whichever scan last covered the region.
+private struct PanelRegionSummary: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var market: MarketStore
+
+    private var liveRules: [(rule: RegionAlertRule, hits: [MarketMachine])] {
+        market.alertRules
+            .map { ($0, market.matches(for: $0)) }
+            .filter { !$0.1.isEmpty }
+    }
+
+    var body: some View {
+        let instance = model.selectedInstance
+        let snapshot = instance.flatMap { market.regionSnapshots[market.canonicalSign(for: $0.regionSign)] }
+        let sameModel = snapshot?.models.first { $0.gpuName == instance?.gpuName }
+        let hasContent = (snapshot != nil && instance != nil) || !liveRules.isEmpty
+
+        if hasContent {
+            VStack(alignment: .leading, spacing: 7) {
+                if let instance, let snapshot {
+                    HStack(spacing: 8) {
+                        Text("本区")
+                            .scaledFont(size: 10.5, weight: .semibold)
+                            .foregroundStyle(AppTheme.textTertiary)
+                        Text(snapshot.regionName)
+                            .scaledFont(size: 11.5, weight: .semibold)
+                            .foregroundStyle(AppTheme.textPrimary)
+                        Spacer(minLength: 0)
+                        Text(snapshot.idleGPUs == 0 ? "无空卡" : "共 \(snapshot.idleGPUs) 张空闲")
+                            .scaledFont(size: 11)
+                            .foregroundStyle(AppTheme.textTertiary)
+                    }
+                    if let sameModel {
+                        Text("\(instance.gpuName)：\(sameModel.idleGPUs) 张 · \(sameModel.machineCount) 台 · 单机最多 \(sameModel.bestSingleMachine)")
+                            .scaledFont(size: 11.5, weight: .medium)
+                            .foregroundStyle(sameModel.bestSingleMachine >= instance.gpuCount ? AppTheme.mint : AppTheme.amber)
+                            .lineLimit(1)
+                    } else {
+                        Text("\(instance.gpuName)：本区暂无空卡")
+                            .scaledFont(size: 11.5, weight: .medium)
+                            .foregroundStyle(AppTheme.textTertiary)
+                    }
+                }
+
+                ForEach(liveRules.prefix(3), id: \.rule.id) { item in
+                    HStack(spacing: 7) {
+                        Image(systemName: "bell.fill")
+                            .scaledFont(size: 10, weight: .semibold)
+                            .foregroundStyle(AppTheme.amber)
+                        Text("\(item.rule.regionName) \(item.rule.gpuName)")
+                            .scaledFont(size: 11, weight: .semibold)
+                            .foregroundStyle(AppTheme.amber)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text("\(item.hits.count) 台有卡")
+                            .scaledFont(size: 11)
+                            .foregroundStyle(AppTheme.textSecondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .panel()
+        }
     }
 }

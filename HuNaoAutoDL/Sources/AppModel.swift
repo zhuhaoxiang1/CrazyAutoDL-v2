@@ -5,7 +5,7 @@ import UserNotifications
 
 enum SidebarSection: String, CaseIterable, Identifiable {
     case dashboard
-    case instances
+    case market
     case billing
     case settings
 
@@ -14,7 +14,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .dashboard: return "监控台"
-        case .instances: return "我的实例"
+        case .market: return "算力市场"
         case .billing: return "账单"
         case .settings: return "设置"
         }
@@ -23,7 +23,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .dashboard: return "dot.radiowaves.left.and.right"
-        case .instances: return "square.stack.3d.up.fill"
+        case .market: return "chart.bar.doc.horizontal"
         case .billing: return "chart.bar.xaxis"
         case .settings: return "slider.horizontal.3"
         }
@@ -32,134 +32,146 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    static let legacyAutoStartKey = "hunao.autoStartEnabled"
+    static let legacySelectedInstanceKey = "hunao.selectedInstanceUUID"
+
     @Published private(set) var phase: SessionPhase = .checking
     @Published var selectedSection: SidebarSection = .dashboard
-    @Published private(set) var instances: [AutoDLInstance] = []
-    @Published private(set) var selectedInstanceID: String?
-    @Published private(set) var stock: GPUStock?
-    @Published private(set) var balance: AccountBalance?
-    @Published private(set) var balanceError: String?
-    @Published private(set) var billing: BillingSnapshot?
-    @Published private(set) var billingError: String?
-    @Published private(set) var isBillingLoading = false
-    @Published private(set) var isRefreshing = false
-    @Published private(set) var lastUpdated: Date?
-    @Published private(set) var lastError: String?
-    @Published private(set) var activity: [ActivityEvent] = []
+    let market = MarketStore()
+    @Published private(set) var monitors: [AccountMonitor] = []
+    @Published private(set) var currentAccountID: String?
+    @Published private(set) var isAddingAccount = false
     @Published private(set) var isLoggingIn = false
     @Published var loginError: String?
-    @Published private(set) var actionInstanceID: String?
-    @Published private(set) var isAutoStarting = false
-    @Published private(set) var autoStartEnabled: Bool
     @Published private(set) var pollInterval: TimeInterval
     @Published private(set) var lowBalanceThreshold: Double
     @Published private(set) var fontScale: Double
-    @Published private(set) var tokenHint = ""
-    @Published private(set) var signedInAt: Date?
+    /// While paused nothing polls in the background and nothing alerts or auto-starts; a manual refresh still shows data.
+    @Published private(set) var monitoringPaused = false
     @Published var toast: ToastMessage?
 
     let notifications = NotificationService.shared
-    let updater = UpdateService()
 
     private let defaults = UserDefaults.standard
     private let isDemo: Bool
-    private var token: String?
-    private var monitoringTask: Task<Void, Never>?
     private var toastDismissTask: Task<Void, Never>?
-    private var gpuWasAvailable = false
-    private var didNotifyForAvailability = false
-    private var didNotifyForLowBalance = false
-    private var lastAutoAttemptAt: Date?
-    private var consecutiveErrors = 0
+    private var currentRelay: AnyCancellable?
 
     private enum DefaultsKey {
-        static let selectedInstance = "hunao.selectedInstanceUUID"
-        static let autoStart = "hunao.autoStartEnabled"
+        static let currentAccount = "hunao.currentAccountID"
         static let pollInterval = "hunao.pollIntervalSeconds"
         static let lowBalanceThreshold = "hunao.lowBalanceThreshold"
         static let fontScale = "hunao.fontScale"
+        static let monitoringPaused = "hunao.monitoringPaused"
     }
 
-    var isLowBalance: Bool {
-        guard let balance else { return false }
-        return balance.available < lowBalanceThreshold
+    // MARK: - Current account
+
+    /// The account shown in the window. Every account keeps monitoring in the background.
+    var current: AccountMonitor? {
+        monitors.first { $0.id == currentAccountID } ?? monitors.first
     }
 
-    var balanceLabel: String {
-        balance?.formattedAvailable ?? "—"
+    var hasMultipleAccounts: Bool { monitors.count > 1 }
+    var currentAccountName: String { current?.account.name ?? "AutoDL 账户" }
+
+    var instances: [AutoDLInstance] { current?.instances ?? [] }
+    var selectedInstanceID: String? { current?.selectedInstanceID }
+    var selectedInstance: AutoDLInstance? { current?.selectedInstance }
+    var stock: GPUStock? { current?.stock }
+    var balance: AccountBalance? { current?.balance }
+    var balanceError: String? { current?.balanceError }
+    var billing: BillingSnapshot? { current?.billing }
+    var billingError: String? { current?.billingError }
+    var isBillingLoading: Bool { current?.isBillingLoading ?? false }
+    var isRefreshing: Bool { current?.isRefreshing ?? false }
+    var lastUpdated: Date? { current?.lastUpdated }
+    var lastError: String? { current?.lastError }
+    var activity: [ActivityEvent] { current?.activity ?? [] }
+    var actionInstanceID: String? { current?.actionInstanceID }
+    var isAutoStarting: Bool { current?.isAutoStarting ?? false }
+    var lostTarget: LostTarget? { current?.lostTarget }
+    func isBusy(_ instanceID: String) -> Bool { current?.isBusy(instanceID) ?? false }
+    var autoStartEnabled: Bool { current?.autoStartEnabled ?? false }
+    var signedInAt: Date? { current?.signedInAt }
+    var tokenHint: String { current?.account.tokenHint ?? "" }
+    var isLowBalance: Bool { current?.isLowBalance ?? false }
+    var balanceLabel: String { current?.balanceLabel ?? "—" }
+    var runningCount: Int { current?.runningCount ?? 0 }
+    var autoStartSubtitle: String { current?.autoStartSubtitle ?? "只提醒，不自动开机" }
+    var availabilityHeadline: String { current?.availabilityHeadline ?? "等待选择实例" }
+    var availabilityCaption: String { current?.availabilityCaption ?? "先在 AutoDL 创建一个实例" }
+
+    var isAnyAutoStartEnabled: Bool {
+        monitors.contains { $0.autoStartEnabled && $0.authFailure == nil }
     }
 
-    var selectedInstance: AutoDLInstance? {
-        guard let selectedInstanceID else { return nil }
-        return instances.first { $0.id == selectedInstanceID }
+    /// The login screen covers the app while adding an account or when the shown account needs to sign in again.
+    var isShowingAuth: Bool {
+        phase == .loggedOut || isAddingAccount || current?.authFailure != nil
     }
 
-    var runningCount: Int {
-        instances.filter { $0.state == .running }.count
+    var authTitle: String {
+        if isAddingAccount { return "添加 AutoDL 账号" }
+        if phase == .signedIn, let current, current.authFailure != nil {
+            return hasMultipleAccounts ? "重新登录「\(current.account.name)」" : "重新登录 AutoDL"
+        }
+        return "登录 AutoDL"
     }
 
-    var autoStartSubtitle: String {
-        if autoStartEnabled {
-            return selectedInstance?.state == .stopped
-                ? "守候空闲卡，出现即开机"
-                : "等待实例关机后接管"
-        }
-        return "只提醒，不自动开机"
+    var canCancelAuth: Bool {
+        isAddingAccount || monitors.contains { $0.id != current?.id && $0.authFailure == nil }
     }
 
-    var availabilityHeadline: String {
-        guard let instance = selectedInstance else { return "等待选择实例" }
-        guard let stock else {
-            return lastError == nil ? "正在读取显卡状态" : "显卡状态暂不可用"
-        }
-        if instance.state == .running {
-            return "实例正在使用 GPU"
-        }
-        if instance.state == .starting {
-            return "实例正在启动"
-        }
-        if instance.state == .stopping {
-            return "实例正在关机"
-        }
-        if stock.isAvailable {
-            return "发现空闲显卡"
-        }
-        if !stock.machineFound {
-            return "目标主机暂未放出空卡"
-        }
-        return "正在等待空闲显卡"
+    func refreshNow() { current?.refreshNow() }
+
+    /// Starts the background scan for region alert rules. Idempotent; called once the window exists.
+    func startRegionWatch() {
+        market.startWatching(
+            account: { [weak self] in
+                guard let monitor = self?.current, monitor.authFailure == nil, !monitor.account.token.isEmpty else {
+                    return nil
+                }
+                return monitor.account
+            },
+            chargeType: { [weak self] in
+                guard let type = self?.selectedInstance?.chargeType, !type.isEmpty else { return "payg" }
+                return type
+            },
+            onAlert: { [weak self] title, body, id in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.presentToast(kind: .warning, title: title, message: body)
+                    await self.notifications.send(
+                        title: title,
+                        body: body,
+                        identifier: id,
+                        threadIdentifier: "hunao.autodl.region"
+                    )
+                }
+            }
+        )
     }
 
-    var availabilityCaption: String {
-        guard let instance = selectedInstance else {
-            return "先在 AutoDL 创建一个实例"
+    /// Asks for notification permission the first time a rule is created, so the alert can actually be shown.
+    func requestNotificationAccessIfNeeded() {
+        Task {
+            await notifications.refreshAuthorizationStatus()
+            if notifications.authorizationStatus == .notDetermined {
+                _ = await notifications.requestAuthorization()
+            }
         }
-        guard let stock else {
-            return "刷新间隔 \(Int(pollInterval)) 秒"
-        }
-        if stock.isAvailable {
-            return autoStartEnabled ? "自动开机已就绪" : "自动开机已关闭，仅发送提醒"
-        }
-        if !stock.machineFound {
-            return "目标主机 \(instance.machineID.isEmpty ? "ID 缺失" : instance.machineID) 暂无空闲卡"
-        }
-        return "已监测目标主机 · \(Int(pollInterval)) 秒刷新"
     }
-
-    var nextCheckDate: Date? {
-        guard let lastUpdated else { return nil }
-        return lastUpdated.addingTimeInterval(pollInterval)
-    }
+    func refreshBilling(force: Bool = false) { current?.refreshBilling(force: force) }
+    func selectInstance(_ id: String) { current?.selectInstance(id) }
+    func setAutoStart(_ enabled: Bool) { current?.setAutoStart(enabled) }
+    func powerOn(instance: AutoDLInstance, noCard: Bool = false) { current?.powerOn(instance: instance, noCard: noCard) }
+    func powerOff(instance: AutoDLInstance) { current?.powerOff(instance: instance) }
 
     init() {
         isDemo = ProcessInfo.processInfo.arguments.contains("--demo")
 
         let defaults = UserDefaults.standard
-        if defaults.object(forKey: DefaultsKey.autoStart) == nil {
-            defaults.set(false, forKey: DefaultsKey.autoStart)
-        }
-        autoStartEnabled = defaults.bool(forKey: DefaultsKey.autoStart)
-
         let storedInterval = defaults.double(forKey: DefaultsKey.pollInterval)
         pollInterval = (8...120).contains(storedInterval) ? storedInterval : 15
 
@@ -168,39 +180,63 @@ final class AppModel: ObservableObject {
 
         let storedScale = defaults.double(forKey: DefaultsKey.fontScale)
         fontScale = (0.85...1.3).contains(storedScale) ? storedScale : 1.0
-
-        selectedInstanceID = defaults.string(forKey: DefaultsKey.selectedInstance)
+        monitoringPaused = defaults.bool(forKey: DefaultsKey.monitoringPaused)
+        market.watchPaused = monitoringPaused
 
         if isDemo {
             applyDemoData()
             return
         }
 
-        if let savedToken = TokenStore.loadToken() {
-            token = savedToken
-            tokenHint = Self.maskedToken(savedToken)
-            phase = .checking
-            Task { await bootstrapWithSavedToken() }
-        } else {
+        let accounts = AccountStore.load()
+        guard !accounts.isEmpty else {
             phase = .loggedOut
+            return
         }
+        monitors = accounts.map {
+            AccountMonitor(account: $0, app: self, inheritLegacySettings: accounts.count == 1)
+        }
+        let saved = defaults.string(forKey: DefaultsKey.currentAccount)
+        currentAccountID = monitors.first { $0.id == saved }?.id ?? monitors.first?.id
+        bindCurrent()
+        phase = .checking
+        Task { await bootstrapAll() }
     }
 
     private func applyDemoData() {
         let seed = DemoData.seed()
-        phase = .signedIn
-        signedInAt = Date().addingTimeInterval(-86_400 * 3)
-        instances = seed.instances
-        selectedInstanceID = seed.selectedInstanceID
-        stock = seed.stock
-        balance = seed.balance
-        billing = seed.billing
-        activity = seed.activity
-        lastUpdated = Date()
-        tokenHint = "demo••••••••"
-        autoStartEnabled = true
+        let lab = AccountMonitor(
+            account: AutoDLAccount(id: "demo-lab", name: "实验室", token: "", isSubAccount: false),
+            app: self
+        )
+        lab.applyDemo(
+            instances: seed.instances,
+            selectedInstanceID: seed.selectedInstanceID,
+            stock: seed.stock,
+            balance: seed.balance,
+            billing: seed.billing,
+            activity: seed.activity,
+            autoStart: true
+        )
+        let personal = AccountMonitor(
+            account: AutoDLAccount(id: "demo-personal", name: "个人", token: "", isSubAccount: false),
+            app: self
+        )
+        personal.applyDemo(
+            instances: Array(seed.instances.suffix(1)),
+            selectedInstanceID: seed.instances.last?.id,
+            stock: nil,
+            balance: AccountBalance(cash: 42.80, blocked: 0, voucher: 0, paymentMethod: "balance", fetchedAt: Date()),
+            billing: nil,
+            activity: [],
+            autoStart: false
+        )
+        monitors = [lab, personal]
+        currentAccountID = lab.id
         pollInterval = 15
         fontScale = 1.0
+        bindCurrent()
+        phase = .signedIn
 
         let arguments = ProcessInfo.processInfo.arguments
         if let argument = arguments.first(where: { $0.hasPrefix("--section=") }),
@@ -209,373 +245,220 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: - Session
-
-    private func bootstrapWithSavedToken() async {
-        guard let token else {
-            phase = .loggedOut
-            return
+    private func bootstrapAll() async {
+        let currentID = current?.id
+        for monitor in monitors where monitor.id != currentID {
+            Task { await monitor.bootstrap() }
         }
-        let api = AutoDLAPI(token: token)
-        do {
-            let list = try await api.fetchInstances()
-            phase = .signedIn
-            signedInAt = Date()
-            applyInstances(list)
-            addActivity(
-                kind: .success,
-                title: "已自动连接 AutoDL",
-                detail: list.isEmpty ? "账号下暂无实例" : "正在守护 \(list.count) 个实例"
-            )
-            notifications.activate()
-            requestNotificationPermissionIfNeeded()
-            startMonitoring(immediately: true)
-        } catch let error as AutoDLError where error.isAuthFailure {
-            expireSession(reason: error.localizedDescription)
-        } catch {
-            phase = .signedIn
-            signedInAt = Date()
-            lastError = error.localizedDescription
-            addActivity(kind: .error, title: "首次同步失败", detail: error.localizedDescription)
-            notifications.activate()
-            requestNotificationPermissionIfNeeded()
-            startMonitoring(immediately: true)
+        await current?.bootstrap()
+        phase = .signedIn
+        notifications.activate()
+        requestNotificationPermissionIfNeeded()
+    }
+
+    private func bindCurrent() {
+        // Only the account on screen redraws the window; background accounts poll silently.
+        currentRelay = current?.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
         }
     }
 
-    func signIn(token rawToken: String) async {
+    // MARK: - Accounts
+
+    func switchAccount(to id: String) {
+        guard currentAccountID != id, monitors.contains(where: { $0.id == id }) else { return }
+        currentAccountID = id
+        if !isDemo {
+            defaults.set(id, forKey: DefaultsKey.currentAccount)
+        }
+        bindCurrent()
+    }
+
+    func beginAddAccount() {
+        loginError = nil
+        Task {
+            // Start from a clean web session so the login page does not reuse the account already added.
+            await LoginWebSession.clearAndWait()
+            isAddingAccount = true
+        }
+    }
+
+    func cancelAuth() {
+        loginError = nil
+        if isAddingAccount {
+            isAddingAccount = false
+            return
+        }
+        if let other = monitors.first(where: { $0.id != current?.id && $0.authFailure == nil }) {
+            switchAccount(to: other.id)
+        }
+    }
+
+    func renameAccount(_ id: String, to rawName: String) {
+        let name = String(rawName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(20))
+        guard !name.isEmpty, let monitor = monitors.first(where: { $0.id == id }),
+              monitor.account.name != name
+        else { return }
+        monitor.rename(name)
+        persistAccounts()
+        objectWillChange.send()
+    }
+
+    func removeAccount(_ id: String) {
+        guard let monitor = monitors.first(where: { $0.id == id }) else { return }
+        monitor.stop(forgetSettings: true)
+        monitors.removeAll { $0.id == id }
+        // The sign-out must not look successful while the token is still on disk: the next launch would log back in.
+        var credentialsRemoved = isDemo || persistAccounts()
+        if !credentialsRemoved && monitors.isEmpty {
+            credentialsRemoved = AccountStore.purge()
+        }
+        if !credentialsRemoved {
+            presentToast(
+                kind: .error,
+                title: "本地凭证删除失败",
+                message: "磁盘上的登录凭证没能清除，下次启动可能仍会自动登录。请检查磁盘空间或文件权限，或手动删除 Application Support/HuNaoAutoDL-v2/accounts.json。"
+            )
+        }
+
+        if currentAccountID == id {
+            currentAccountID = monitors.first?.id
+            if let next = currentAccountID {
+                defaults.set(next, forKey: DefaultsKey.currentAccount)
+            } else {
+                defaults.removeObject(forKey: DefaultsKey.currentAccount)
+            }
+            bindCurrent()
+        }
+
+        if monitors.isEmpty {
+            LoginWebSession.clear()
+            phase = .loggedOut
+            isAddingAccount = false
+            loginError = nil
+        }
+        notifications.activate()
+    }
+
+    /// Signs out of the account on screen; other accounts keep running.
+    func logout() {
+        if let id = current?.id {
+            removeAccount(id)
+        }
+    }
+
+    @discardableResult
+    func persistAccounts() -> Bool {
+        guard !isDemo else { return false }
+        return AccountStore.save(monitors.map(\.account))
+    }
+
+    func accountDidExpire(_ monitor: AccountMonitor) {
+        LoginWebSession.clear()
+        let message = hasMultipleAccounts ? "「\(monitor.account.name)」需要重新登录" : "请重新连接 AutoDL"
+        presentToast(kind: .error, title: "登录已失效", message: message)
+        if monitor.id != current?.id {
+            Task {
+                await notifications.send(
+                    title: "登录已失效",
+                    body: "\(message)，该账号的监控和自动开机已暂停。",
+                    identifier: "hunao.auth.expired.\(monitor.id)"
+                )
+            }
+        }
+    }
+
+    private func nextAccountName() -> String {
+        let used = Set(monitors.map(\.account.name))
+        var index = monitors.count + 1
+        while used.contains("账号 \(index)") {
+            index += 1
+        }
+        return "账号 \(index)"
+    }
+
+    // MARK: - Sign in
+
+    @discardableResult
+    func signIn(token rawToken: String) async -> Bool {
         let candidate = rawToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !candidate.isEmpty, !isLoggingIn else { return }
+        guard !candidate.isEmpty, !isLoggingIn else { return false }
+
+        let reauthTarget = isAddingAccount ? nil : monitors.first { $0.id == current?.id && $0.authFailure != nil }
+        if let existing = monitors.first(where: { $0.account.token == candidate }), existing.id != reauthTarget?.id {
+            loginError = "这个账号已经添加过（\(existing.account.name)）。要添加另一个账号，请先在网页里退出 AutoDL，再登录另一个账号。"
+            return false
+        }
 
         isLoggingIn = true
         loginError = nil
         defer { isLoggingIn = false }
 
-        let api = AutoDLAPI(token: candidate)
         do {
-            let list = try await api.fetchInstances()
-            let saved = TokenStore.saveToken(candidate)
-            token = candidate
-            tokenHint = Self.maskedToken(candidate)
-            phase = .signedIn
-            signedInAt = Date()
-            loginError = nil
-            lastError = nil
-            applyInstances(list)
-            addActivity(
-                kind: .success,
-                title: "登录成功",
-                detail: saved ? "Token 已保存到本机受保护文件" : "Token 已在本次运行中生效"
-            )
-            if list.isEmpty {
-                addActivity(kind: .info, title: "账号下暂无实例", detail: "请先在 AutoDL 创建实例")
+            let connection = try await AutoDLAPI.connect(token: candidate)
+            let list = connection.instances
+            let isSubAccount = connection.api.isSubAccount
+            let instanceIDs = Set(list.map(\.id))
+
+            // A new token whose instances belong to an account we already have refreshes that account;
+            // signing in to a different account from the re-login screen adds it instead of overwriting.
+            var target = reauthTarget
+            if let reauthTarget, !instanceIDs.isEmpty, !reauthTarget.knownInstanceIDs.isEmpty,
+               instanceIDs.isDisjoint(with: reauthTarget.knownInstanceIDs) {
+                target = nil
             }
+            if target == nil {
+                target = monitors.first {
+                    !instanceIDs.isEmpty && !instanceIDs.isDisjoint(with: $0.knownInstanceIDs)
+                }
+            }
+
+            if let target {
+                target.updateCredentials(token: candidate, isSubAccount: isSubAccount, instances: list, saved: true)
+                if !persistAccounts() {
+                    target.addActivity(kind: .warning, title: "Token 未能写入本机", detail: "仅在本次运行中生效")
+                }
+                switchAccount(to: target.id)
+                if isAddingAccount {
+                    presentToast(kind: .info, title: "账号已存在", message: "已更新「\(target.account.name)」的登录凭证")
+                }
+            } else {
+                let account = AutoDLAccount(name: nextAccountName(), token: candidate, isSubAccount: isSubAccount)
+                let monitor = AccountMonitor(account: account, app: self, inheritLegacySettings: monitors.isEmpty)
+                monitors.append(monitor)
+                monitor.activate(instances: list, saved: persistAccounts())
+                switchAccount(to: monitor.id)
+                if hasMultipleAccounts {
+                    presentToast(
+                        kind: .success,
+                        title: "已添加「\(account.name)」",
+                        message: "两个账号会同时监控，点左下角账号可以切换查看。"
+                    )
+                }
+            }
+
+            isAddingAccount = false
+            loginError = nil
+            phase = .signedIn
             notifications.activate()
             requestNotificationPermissionIfNeeded()
-            startMonitoring(immediately: true)
+            return true
         } catch let error as AutoDLError where error.isAuthFailure {
             loginError = "Token 无效或已过期，请重新扫码或登录"
         } catch {
             loginError = error.localizedDescription
         }
+        return false
     }
 
-    func logout() {
-        monitoringTask?.cancel()
-        monitoringTask = nil
-        token = nil
-        tokenHint = ""
-        TokenStore.deleteToken()
-        LoginWebSession.clear()
-        phase = .loggedOut
-        signedInAt = nil
-        instances = []
-        selectedInstanceID = nil
-        stock = nil
-        lastUpdated = nil
-        lastError = nil
-        loginError = nil
-        isRefreshing = false
-        activity = []
-        balance = nil
-        balanceError = nil
-        billing = nil
-        billingError = nil
-        isBillingLoading = false
-        gpuWasAvailable = false
-        didNotifyForAvailability = false
-        didNotifyForLowBalance = false
-        lastAutoAttemptAt = nil
-        defaults.removeObject(forKey: DefaultsKey.selectedInstance)
-        notifications.activate()
-    }
+    // MARK: - Settings
 
-    private func expireSession(reason: String) {
-        monitoringTask?.cancel()
-        monitoringTask = nil
-        token = nil
-        tokenHint = ""
-        TokenStore.deleteToken()
-        LoginWebSession.clear()
-        phase = .loggedOut
-        signedInAt = nil
-        stock = nil
-        balance = nil
-        balanceError = nil
-        billing = nil
-        billingError = nil
-        isBillingLoading = false
-        didNotifyForLowBalance = false
-        lastUpdated = nil
-        isRefreshing = false
-        loginError = reason
-        addActivity(kind: .error, title: "登录已失效", detail: reason)
-        presentToast(kind: .error, title: "登录已失效", message: "请重新连接 AutoDL")
-    }
-
-    // MARK: - Monitoring
-
-    private func startMonitoring(immediately: Bool) {
-        monitoringTask?.cancel()
-        monitoringTask = Task { [weak self] in
-            guard let self else { return }
-            if immediately {
-                await self.refreshAll()
-            }
-            while !Task.isCancelled {
-                let interval = max(self.pollInterval, 8)
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                if Task.isCancelled { return }
-                await self.refreshAll()
-            }
-        }
-    }
-
-    func refreshNow() {
-        Task { await refreshAll(userInitiated: true) }
-    }
-
-    private func refreshAll(userInitiated: Bool = false) async {
-        guard phase == .signedIn, let token else { return }
-        guard !isRefreshing else { return }
-
-        isRefreshing = true
-        defer { isRefreshing = false }
-
-        let api = AutoDLAPI(token: token)
-        do {
-            let list = try await api.fetchInstances()
-            guard self.token == token, phase == .signedIn else { return }
-
-            applyInstances(list)
-            lastError = nil
-            consecutiveErrors = 0
-
-            do {
-                let latestBalance = try await api.fetchBalance()
-                guard self.token == token, phase == .signedIn else { return }
-                balance = latestBalance
-                balanceError = nil
-                evaluateBalanceAlert()
-            } catch let error as AutoDLError where error.isAuthFailure {
-                expireSession(reason: error.localizedDescription)
-                return
-            } catch {
-                balanceError = error.localizedDescription
-            }
-
-            guard let instance = selectedInstance else {
-                stock = nil
-                lastUpdated = Date()
-                return
-            }
-
-            do {
-                let latestStock = try await api.fetchGPUStock(for: instance)
-                guard self.token == token, phase == .signedIn else { return }
-                self.stock = latestStock
-                self.lastUpdated = Date()
-                self.evaluateStock(latestStock, for: instance)
-            } catch let error as AutoDLError where error.isAuthFailure {
-                expireSession(reason: error.localizedDescription)
-                return
-            } catch {
-                lastError = "显卡状态同步失败：\(error.localizedDescription)"
-                stock = nil
-                lastUpdated = Date()
-                registerFailure(message: lastError ?? "")
-            }
-        } catch let error as AutoDLError where error.isAuthFailure {
-            expireSession(reason: error.localizedDescription)
-        } catch {
-            lastError = error.localizedDescription
-            registerFailure(message: error.localizedDescription)
-            if userInitiated {
-                presentToast(kind: .error, title: "同步失败", message: error.localizedDescription)
-            }
-        }
-    }
-
-    // MARK: - Billing
-
-    func refreshBilling(force: Bool = false) {
-        Task { await loadBilling(force: force) }
-    }
-
-    private func loadBilling(force: Bool) async {
-        guard phase == .signedIn, let token, !isBillingLoading else { return }
-        if !force, let billing, Date().timeIntervalSince(billing.fetchedAt) < 120 { return }
-
-        isBillingLoading = true
-        defer { isBillingLoading = false }
-
-        let calendar = AppTime.calendar
-        let end = Date()
-        let start = calendar.date(
-            byAdding: .day,
-            value: -35,
-            to: calendar.startOfDay(for: end)
-        ) ?? end
-
-        do {
-            let records = try await AutoDLAPI(token: token).fetchBills(from: start, to: end)
-            guard self.token == token, phase == .signedIn else { return }
-            billing = BillingSnapshot(records: records, fetchedAt: Date())
-            billingError = nil
-        } catch let error as AutoDLError where error.isAuthFailure {
-            expireSession(reason: error.localizedDescription)
-        } catch {
-            guard self.token == token, phase == .signedIn else { return }
-            billingError = error.localizedDescription
-        }
-    }
-
-    private func registerFailure(message: String) {
-        consecutiveErrors += 1
-        if consecutiveErrors == 1 || consecutiveErrors % 10 == 0 {
-            addActivity(kind: .error, title: "监控同步异常", detail: message)
-        }
-    }
-
-    private func applyInstances(_ list: [AutoDLInstance]) {
-        instances = list
-        let previousSelection = selectedInstanceID
-
-        var next: AutoDLInstance?
-        if let stored = defaults.string(forKey: DefaultsKey.selectedInstance) {
-            next = list.first { $0.id == stored }
-        }
-        if next == nil, let previousSelection {
-            next = list.first { $0.id == previousSelection }
-        }
-        if next == nil {
-            next = list.first
-        }
-
-        selectedInstanceID = next?.id
-        if let id = next?.id {
-            defaults.set(id, forKey: DefaultsKey.selectedInstance)
-        }
-
-        if previousSelection != next?.id {
-            stock = nil
-            lastUpdated = nil
-            resetAvailabilityEpisode()
-            lastAutoAttemptAt = nil
-        }
-    }
-
-    func selectInstance(_ id: String) {
-        guard selectedInstanceID != id, instances.contains(where: { $0.id == id }) else { return }
-        selectedInstanceID = id
-        defaults.set(id, forKey: DefaultsKey.selectedInstance)
-        stock = nil
-        lastUpdated = nil
-        lastError = nil
-        resetAvailabilityEpisode()
-        lastAutoAttemptAt = nil
-        if let instance = selectedInstance {
-            addActivity(kind: .info, title: "已切换监控目标", detail: "\(instance.name) · \(instance.gpuName)")
-        }
-        Task { await refreshAll(userInitiated: true) }
-    }
-
-    private func resetAvailabilityEpisode() {
-        gpuWasAvailable = false
-        didNotifyForAvailability = false
-    }
-
-    private func evaluateStock(_ latestStock: GPUStock, for instance: AutoDLInstance) {
-        let available = latestStock.isAvailable
-        let isPoweredOff = instance.state.isPoweredOff
-
-        if available && !gpuWasAvailable {
-            addActivity(
-                kind: .warning,
-                title: "发现空闲显卡",
-                detail: "\(instance.machineID) · \(latestStock.idleGPUs) 张 \(instance.gpuName) 空闲"
-            )
-            if autoStartEnabled {
-                addActivity(kind: .info, title: "自动开机已触发", detail: "正在尝试抢占空闲 GPU")
-            }
-        }
-
-        gpuWasAvailable = available
-        if !available {
-            didNotifyForAvailability = false
-            return
-        }
-
-        guard isPoweredOff else { return }
-
-        if autoStartEnabled {
-            Task { await attemptAutoPowerOn(instance: instance, stock: latestStock) }
-        } else if !didNotifyForAvailability {
-            didNotifyForAvailability = true
-            notifyGPUAvailable(instance: instance, stock: latestStock)
-        }
-    }
-
-    private func notifyGPUAvailable(instance: AutoDLInstance, stock: GPUStock) {
-        let title = "发现空闲 GPU"
-        let body = "\(instance.name) 所在主机有 \(stock.idleGPUs) 张 \(instance.gpuName) 空闲，自动开机已关闭。"
-        addActivity(kind: .warning, title: "已发送空闲提醒", detail: body)
-        presentToast(kind: .warning, title: title, message: body)
-        Task {
-            await notifications.send(
-                title: title,
-                body: body,
-                identifier: "hunao.gpu.available.\(instance.id)"
-            )
-        }
-    }
-
-    // MARK: - Automation
-
-    func setAutoStart(_ enabled: Bool) {
-        guard autoStartEnabled != enabled else { return }
-        autoStartEnabled = enabled
-        defaults.set(enabled, forKey: DefaultsKey.autoStart)
-
-        if enabled {
-            addActivity(kind: .info, title: "自动开机已开启", detail: "检测到空闲显卡后自动抢占")
-            if let instance = selectedInstance,
-               instance.state.isPoweredOff,
-               let stock,
-               stock.isAvailable {
-                Task { await attemptAutoPowerOn(instance: instance, stock: stock) }
-            }
-        } else {
-            addActivity(kind: .info, title: "自动开机已关闭", detail: "之后仅在有卡空闲时提醒")
-            if let instance = selectedInstance,
-               instance.state.isPoweredOff,
-               let stock,
-               stock.isAvailable,
-               !didNotifyForAvailability {
-                didNotifyForAvailability = true
-                notifyGPUAvailable(instance: instance, stock: stock)
-            }
-        }
+    func setMonitoringPaused(_ paused: Bool) {
+        guard monitoringPaused != paused else { return }
+        monitoringPaused = paused
+        defaults.set(paused, forKey: DefaultsKey.monitoringPaused)
+        market.watchPaused = paused
+        monitors.forEach { $0.monitoringPauseChanged(paused) }
     }
 
     func setPollInterval(_ seconds: TimeInterval) {
@@ -583,10 +466,8 @@ final class AppModel: ObservableObject {
         guard pollInterval != normalized else { return }
         pollInterval = normalized
         defaults.set(normalized, forKey: DefaultsKey.pollInterval)
-        addActivity(kind: .info, title: "刷新间隔已调整", detail: "每 \(Int(normalized)) 秒检查一次")
-        if phase == .signedIn {
-            startMonitoring(immediately: false)
-        }
+        current?.addActivity(kind: .info, title: "刷新间隔已调整", detail: "每 \(Int(normalized)) 秒检查一次")
+        monitors.forEach { $0.restartMonitoring() }
     }
 
     func setLowBalanceThreshold(_ value: Double) {
@@ -594,18 +475,12 @@ final class AppModel: ObservableObject {
         guard abs(normalized - lowBalanceThreshold) > 0.001 else { return }
         lowBalanceThreshold = normalized
         defaults.set(normalized, forKey: DefaultsKey.lowBalanceThreshold)
-        addActivity(
+        current?.addActivity(
             kind: .info,
             title: "余额提醒阈值已更新",
             detail: "可用余额低于 \(AccountBalance.currency(normalized)) 时提醒"
         )
-
-        guard let balance else { return }
-        if balance.available >= normalized {
-            didNotifyForLowBalance = false
-        } else {
-            evaluateBalanceAlert()
-        }
+        monitors.forEach { $0.lowBalanceThresholdChanged() }
     }
 
     func setFontScale(_ value: Double) {
@@ -613,106 +488,6 @@ final class AppModel: ObservableObject {
         guard abs(stepped - fontScale) > 0.001 else { return }
         fontScale = stepped
         defaults.set(stepped, forKey: DefaultsKey.fontScale)
-    }
-
-    private func evaluateBalanceAlert() {
-        guard let balance else { return }
-        guard balance.available < lowBalanceThreshold else {
-            didNotifyForLowBalance = false
-            return
-        }
-        guard !didNotifyForLowBalance else { return }
-        didNotifyForLowBalance = true
-
-        let title = "余额不足提醒"
-        let voucherNote = balance.voucher > 0 ? "（含代金券 \(balance.formattedVoucher)）" : ""
-        let body = "AutoDL 可用余额 \(balance.formattedAvailable)\(voucherNote)，已低于 \(AccountBalance.currency(lowBalanceThreshold))，请及时充值以免影响自动开机。"
-        addActivity(kind: .warning, title: title, detail: body)
-        presentToast(kind: .warning, title: title, message: body)
-        Task {
-            await notifications.send(
-                title: title,
-                body: body,
-                identifier: "hunao.balance.low"
-            )
-        }
-    }
-
-    private func attemptAutoPowerOn(instance: AutoDLInstance, stock: GPUStock) async {
-        guard autoStartEnabled, phase == .signedIn, !isAutoStarting else { return }
-        guard instance.id == selectedInstanceID else { return }
-        guard instance.state.isPoweredOff else { return }
-        guard stock.isAvailable else { return }
-        if let lastAutoAttemptAt, Date().timeIntervalSince(lastAutoAttemptAt) < 60 {
-            return
-        }
-
-        guard let token else { return }
-        isAutoStarting = true
-        lastAutoAttemptAt = Date()
-        defer { isAutoStarting = false }
-
-        do {
-            try await AutoDLAPI(token: token).powerOn(instanceUUID: instance.id)
-            let title = "自动开机成功"
-            let detail = "\(instance.name) 正在启动，已抢占 \(stock.idleGPUs) 张空闲 \(instance.gpuName)"
-            addActivity(kind: .success, title: title, detail: detail)
-            presentToast(kind: .success, title: title, message: detail)
-            await notifications.send(
-                title: title,
-                body: detail,
-                identifier: "hunao.autostart.success.\(instance.id)"
-            )
-            let delay: UInt64 = 2_500_000_000
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: delay)
-                await self?.refreshAll()
-            }
-        } catch let error as AutoDLError where error.isAuthFailure {
-            expireSession(reason: error.localizedDescription)
-        } catch {
-            let detail = error.localizedDescription
-            addActivity(kind: .error, title: "自动开机失败", detail: detail)
-            presentToast(kind: .error, title: "自动开机失败", message: detail)
-        }
-    }
-
-    func powerOn(instance: AutoDLInstance) {
-        Task { await performPowerAction(instance: instance, turnOn: true) }
-    }
-
-    func powerOff(instance: AutoDLInstance) {
-        Task { await performPowerAction(instance: instance, turnOn: false) }
-    }
-
-    private func performPowerAction(instance: AutoDLInstance, turnOn: Bool) async {
-        guard phase == .signedIn, actionInstanceID == nil, let token else { return }
-        actionInstanceID = instance.id
-        defer { actionInstanceID = nil }
-
-        do {
-            let api = AutoDLAPI(token: token)
-            if turnOn {
-                try await api.powerOn(instanceUUID: instance.id)
-            } else {
-                try await api.powerOff(instanceUUID: instance.id)
-            }
-            addActivity(
-                kind: .success,
-                title: turnOn ? "手动开机指令已发送" : "手动关机指令已发送",
-                detail: instance.name
-            )
-            let delay: UInt64 = 2_000_000_000
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: delay)
-                await self?.refreshAll()
-            }
-        } catch let error as AutoDLError where error.isAuthFailure {
-            expireSession(reason: error.localizedDescription)
-        } catch {
-            presentToast(kind: .error, title: turnOn ? "开机失败" : "关机失败", message: error.localizedDescription)
-            addActivity(kind: .error, title: turnOn ? "开机失败" : "关机失败", detail: error.localizedDescription)
-        }
     }
 
     // MARK: - Notifications
@@ -766,13 +541,6 @@ final class AppModel: ObservableObject {
 
     // MARK: - UI helpers
 
-    func addActivity(kind: ActivityKind, title: String, detail: String = "") {
-        activity.insert(ActivityEvent(kind: kind, title: title, detail: detail), at: 0)
-        if activity.count > 40 {
-            activity = Array(activity.prefix(40))
-        }
-    }
-
     func presentToast(kind: ActivityKind, title: String, message: String) {
         let newToast = ToastMessage(kind: kind, title: title, message: message)
         toast = newToast
@@ -790,10 +558,5 @@ final class AppModel: ObservableObject {
         if self.toast?.id == toast.id {
             self.toast = nil
         }
-    }
-
-    private static func maskedToken(_ token: String) -> String {
-        guard token.count > 12 else { return "••••••••" }
-        return "\(token.prefix(5))••••••\(token.suffix(4))"
     }
 }

@@ -2,8 +2,6 @@ import SwiftUI
 
 struct SidebarView: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var updater: UpdateService
-    @State private var starHovered = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -14,174 +12,108 @@ struct SidebarView: View {
 
             divider
 
-            EyebrowLabel(text: "Workspace", tint: AppTheme.textTertiary)
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
-                .padding(.bottom, 9)
-
-            VStack(spacing: 5) {
+            VStack(spacing: 2) {
                 ForEach(SidebarSection.allCases) { section in
                     SidebarItem(
                         section: section,
-                        isSelected: model.selectedSection == section,
-                        showsUpdateBadge: section == .settings && updater.showsUpdateAttention
-                    ) {
-                        withAnimation(.smooth(duration: 0.32)) {
-                            model.selectedSection = section
-                        }
+                        isSelected: model.selectedSection == section) {
+                        model.selectedSection = section
                     }
                 }
-
-                starItem
             }
             .padding(.horizontal, 10)
+            .padding(.top, 12)
 
             Spacer(minLength: 24)
 
-            liveStatusCard
-                .padding(.horizontal, 12)
-
             accountCard
                 .padding(.horizontal, 12)
-                .padding(.top, 10)
+                .padding(.top, 8)
                 .padding(.bottom, 14)
         }
-        .frame(width: 224)
+        .frame(width: 200)
         .frame(maxHeight: .infinity)
-        .background {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.black.opacity(0.10))
-        }
-        .glassPanel(cornerRadius: 26, tint: AppTheme.mint)
-        .overlay(alignment: .topLeading) {
-            Circle()
-                .fill(AppTheme.mint.opacity(0.12))
-                .frame(width: 150, height: 150)
-                .blur(radius: 60)
-                .offset(x: -55, y: -65)
-                .allowsHitTesting(false)
-        }
+        .panel()
     }
 
     private var brand: some View {
         HStack(spacing: 11) {
-            BrandMark(size: 40)
+            BrandMark(size: 26)
             VStack(alignment: .leading, spacing: 1) {
-                HStack(alignment: .firstTextBaseline, spacing: 1) {
-                    Text("胡闹")
-                        .foregroundStyle(AppTheme.textPrimary)
-                    Text("AutoDL")
-                        .foregroundStyle(AppTheme.mint)
-                }
-                .scaledFont(size: 17, weight: .bold, design: .rounded)
-                .lineLimit(1)
-
-                Text("GPU SENTINEL")
-                    .scaledFont(size: 7.5, weight: .bold, design: .rounded)
-                    .tracking(1.5)
-                    .foregroundStyle(AppTheme.textTertiary)
+                Text("胡闹AutoDL")
+                    .scaledFont(size: 14, weight: .bold)
+                    .foregroundStyle(AppTheme.textPrimary)
+                    .lineLimit(1)
+                Text("$ gpu-sentinel")
+                    .scaledFont(size: 10)
+                    .foregroundStyle(AppTheme.mint.opacity(0.8))
             }
         }
     }
 
     private var divider: some View {
         Rectangle()
-            .fill(
-                LinearGradient(
-                    colors: [.clear, .white.opacity(0.10), .clear],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
-            .frame(height: 0.7)
+            .fill(AppTheme.border)
+            .frame(height: 1)
             .padding(.horizontal, 18)
     }
 
-    private var liveStatusCard: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 7) {
-                ZStack {
-                    Circle()
-                        .fill(AppTheme.mint.opacity(0.13))
-                        .frame(width: 18, height: 18)
-                    Circle()
-                        .fill(AppTheme.mint)
-                        .frame(width: 5, height: 5)
-                        .shadow(color: AppTheme.mint.opacity(0.8), radius: 4)
-                }
-                Text("守候中")
-                    .scaledFont(size: 10.5, weight: .semibold)
-                    .foregroundStyle(AppTheme.mint.opacity(0.92))
-                Spacer()
-                Text("LIVE")
-                    .scaledFont(size: 7.5, weight: .bold, design: .rounded)
-                    .tracking(1)
-                    .foregroundStyle(AppTheme.mint.opacity(0.72))
-            }
-
-            HStack(alignment: .lastTextBaseline, spacing: 4) {
-                Text("\(model.runningCount)")
-                    .scaledFont(size: 24, weight: .bold, design: .rounded)
-                    .foregroundStyle(AppTheme.textPrimary)
-                    .monospacedDigit()
-                Text("/ \(model.instances.count) 台运行中")
-                    .scaledFont(size: 9.5, weight: .medium)
-                    .foregroundStyle(AppTheme.textTertiary)
-            }
-
-            HStack(spacing: 5) {
-                Image(systemName: "clock")
-                    .scaledFont(size: 8, weight: .semibold)
-                Text("同步于 \(AppFormat.relative(model.lastUpdated))")
-                    .scaledFont(size: 8.5, weight: .medium)
-            }
-            .foregroundStyle(AppTheme.textTertiary)
-        }
-        .padding(13)
-        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .strokeBorder(.white.opacity(0.065), lineWidth: 0.6)
-        }
-    }
-
     private var accountCard: some View {
-        HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [AppTheme.aqua.opacity(0.22), AppTheme.violet.opacity(0.22)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 31, height: 31)
-                Text("A")
-                    .scaledFont(size: 12, weight: .bold, design: .rounded)
-                    .foregroundStyle(AppTheme.textPrimary.opacity(0.88))
-            }
-            .overlay {
-                Circle().strokeBorder(.white.opacity(0.14), lineWidth: 0.7)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("AutoDL 账户")
-                    .scaledFont(size: 10, weight: .semibold)
-                    .foregroundStyle(AppTheme.textPrimary.opacity(0.88))
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(balanceTint)
-                        .frame(width: 4, height: 4)
-                    Text(model.balance == nil ? "余额同步中" : "余额 \(model.balanceLabel)")
-                        .scaledFont(size: 8.5, weight: .medium)
-                        .foregroundStyle(model.isLowBalance ? AppTheme.amber.opacity(0.88) : AppTheme.textTertiary)
-                        .lineLimit(1)
+        HStack(spacing: 8) {
+            Menu {
+                ForEach(model.monitors) { monitor in
+                    Button {
+                        model.switchAccount(to: monitor.id)
+                    } label: {
+                        if monitor.id == model.current?.id {
+                            Label(menuTitle(for: monitor), systemImage: "checkmark")
+                        } else {
+                            Text(menuTitle(for: monitor))
+                        }
+                    }
                 }
-            }
-            .help(balanceHelp)
+                Divider()
+                Button("添加账号…") {
+                    model.beginAddAccount()
+                }
+                Button("管理账号…") {
+                    model.selectedSection = .settings
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.currentAccountName)
+                            .scaledFont(size: 10, weight: .semibold)
+                            .foregroundStyle(AppTheme.textPrimary.opacity(0.88))
+                            .lineLimit(1)
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(balanceTint)
+                                .frame(width: 4, height: 4)
+                            Text(model.balance == nil ? "余额同步中" : "余额 \(model.balanceLabel)")
+                                .scaledFont(size: 8.5, weight: .medium)
+                                .foregroundStyle(model.isLowBalance ? AppTheme.amber.opacity(0.88) : AppTheme.textTertiary)
+                                .lineLimit(1)
+                        }
+                    }
 
-            Spacer(minLength: 0)
+                    Spacer(minLength: 0)
+
+                    if otherAccountNeedsLogin {
+                        Circle()
+                            .fill(AppTheme.amber)
+                            .frame(width: 6, height: 6)
+                    }
+                    Image(systemName: "chevron.up.chevron.down")
+                        .scaledFont(size: 8.5, weight: .semibold)
+                        .foregroundStyle(AppTheme.textTertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .help(accountHelp)
 
             Button {
                 model.selectedSection = .settings
@@ -190,74 +122,50 @@ struct SidebarView: View {
                     .scaledFont(size: 10.5, weight: .semibold)
                     .foregroundStyle(AppTheme.textTertiary)
                     .frame(width: 25, height: 25)
-                    .background(.white.opacity(0.045), in: Circle())
+                    .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
             }
             .buttonStyle(.plain)
             .help("设置")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
-        .background(.white.opacity(0.028), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.white.opacity(0.055), lineWidth: 0.6)
-        }
+        .background(.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
     }
 
-    private var starItem: some View {
-        Button {
-            AppLinks.openRepository()
-        } label: {
-            HStack(spacing: 11) {
-                Image(systemName: "star.fill")
-                    .scaledFont(size: 12.5, weight: .semibold)
-                    .foregroundStyle(AppTheme.amber)
-                    .frame(width: 22)
-
-                Text("点个 Star")
-                    .scaledFont(size: 12.5, weight: .medium)
-                    .foregroundStyle(AppTheme.textSecondary)
-
-                Spacer()
-
-                Text(AppLinks.author)
-                    .scaledFont(size: 8.5, weight: .bold, design: .rounded)
-                    .foregroundStyle(AppTheme.amber.opacity(0.78))
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 40)
-            .contentShape(Rectangle())
-            .background(
-                AppTheme.amber.opacity(starHovered ? 0.10 : 0.038),
-                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(AppTheme.amber.opacity(0.10), lineWidth: 0.7)
-            }
+    private func menuTitle(for monitor: AccountMonitor) -> String {
+        if monitor.authFailure != nil {
+            return "\(monitor.account.name) · 需重新登录"
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.16)) { starHovered = hovering }
+        if monitor.balance != nil {
+            return "\(monitor.account.name) · \(monitor.balanceLabel)"
         }
-        .help("作者 \(AppLinks.author) · \(AppLinks.repositoryLabel)")
+        return monitor.account.name
+    }
+
+    private var otherAccountNeedsLogin: Bool {
+        model.monitors.contains { $0.id != model.current?.id && $0.authFailure != nil }
+    }
+
+    private var accountHelp: String {
+        var lines = ["切换账号或添加新账号"]
+        if let balance = model.balance {
+            lines.append("现金 \(balance.formattedCash) · 代金券 \(balance.formattedVoucher) · 冻结 \(balance.formattedBlocked)")
+        }
+        if otherAccountNeedsLogin {
+            lines.append("有账号需要重新登录")
+        }
+        return lines.joined(separator: "\n")
     }
 
     private var balanceTint: Color {
         guard model.balance != nil else { return AppTheme.textTertiary }
         return model.isLowBalance ? AppTheme.amber : AppTheme.mint
     }
-
-    private var balanceHelp: String {
-        guard let balance = model.balance else { return "正在同步 AutoDL 账户余额" }
-        return "现金 \(balance.formattedCash) · 代金券 \(balance.formattedVoucher) · 冻结 \(balance.formattedBlocked)"
-    }
 }
 
 private struct SidebarItem: View {
     let section: SidebarSection
     let isSelected: Bool
-    var showsUpdateBadge = false
     let action: () -> Void
 
     @State private var hovered = false
@@ -267,7 +175,7 @@ private struct SidebarItem: View {
             HStack(spacing: 11) {
                 Image(systemName: section.symbol)
                     .scaledFont(size: 12.5, weight: .semibold)
-                    .foregroundStyle(isSelected ? AppTheme.mint : AppTheme.textSecondary)
+                    .foregroundStyle(isSelected ? AppTheme.textPrimary : AppTheme.textSecondary)
                     .frame(width: 22)
 
                 Text(section.title)
@@ -276,53 +184,24 @@ private struct SidebarItem: View {
 
                 Spacer()
 
-                if showsUpdateBadge && !isSelected {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(AppTheme.amber)
-                            .frame(width: 4, height: 4)
-                            .shadow(color: AppTheme.amber.opacity(0.9), radius: 4)
-                        Text("NEW")
-                            .scaledFont(size: 7, weight: .bold, design: .rounded)
-                            .tracking(0.6)
-                            .foregroundStyle(AppTheme.amber.opacity(0.9))
-                    }
-                }
-
-                if isSelected {
-                    Circle()
-                        .fill(AppTheme.mint)
-                        .frame(width: 4, height: 4)
-                        .shadow(color: AppTheme.mint.opacity(0.9), radius: 5)
-                }
             }
             .padding(.horizontal, 12)
-            .frame(height: 40)
+            .frame(height: 34)
             .contentShape(Rectangle())
-            .background {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(
-                        isSelected
-                            ? AnyShapeStyle(
-                                LinearGradient(
-                                    colors: [AppTheme.mint.opacity(0.13), AppTheme.aqua.opacity(0.045)],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
-                            : AnyShapeStyle(.white.opacity(hovered ? 0.045 : 0.001))
-                    )
-            }
-            .overlay {
+            .background(
+                .white.opacity(isSelected ? 0.07 : (hovered ? 0.04 : 0)),
+                in: RoundedRectangle(cornerRadius: 3, style: .continuous)
+            )
+            .overlay(alignment: .leading) {
                 if isSelected {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(AppTheme.mint.opacity(0.16), lineWidth: 0.7)
+                    Rectangle()
+                        .fill(AppTheme.mint)
+                        .frame(width: 2, height: 18)
                 }
             }
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.16)) { hovered = hovering }
-        }
+        .focusEffectDisabled()
+        .onHover { hovered = $0 }
     }
 }

@@ -5,17 +5,17 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
 	<key>CFBundleDisplayName</key>
-	<string>胡闹AutoDL</string>
+	<string>胡闹AutoDL v2</string>
 	<key>CFBundleExecutable</key>
 	<string>HuNaoAutoDL</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIconV2</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.hunao.autodl</string>
+	<string>com.hunao.autodl.v2</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>胡闹AutoDL</string>
+	<string>胡闹AutoDL v2</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

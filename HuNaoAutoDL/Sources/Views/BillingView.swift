@@ -42,7 +42,7 @@ struct BillingView: View {
             .padding(.bottom, 26)
         }
         .scrollIndicators(.never)
-        .task {
+        .task(id: model.current?.id) {
             model.refreshBilling()
         }
         .animation(.smooth(duration: 0.3), value: model.billing)
@@ -52,12 +52,10 @@ struct BillingView: View {
     private var header: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
-                EyebrowLabel(text: "Billing Ledger", tint: AppTheme.amber)
                 HStack(spacing: 10) {
                     Text("账单")
-                        .scaledFont(size: 27, weight: .bold, design: .rounded)
+                        .scaledFont(size: 22, weight: .semibold)
                         .foregroundStyle(AppTheme.textPrimary)
-                        .tracking(-0.6)
                     StatusPill(
                         label: snapshot == nil ? "同步中" : "近 \(rangeDays) 天",
                         tint: snapshot == nil ? AppTheme.textSecondary : AppTheme.amber
@@ -82,7 +80,7 @@ struct BillingView: View {
                     }
                     .padding(.horizontal, 11)
                     .frame(height: 32)
-                    .glassPanel(cornerRadius: 11, tint: .white)
+                    .panel(cornerRadius: 8)
                 }
 
                 Button {
@@ -96,7 +94,7 @@ struct BillingView: View {
                 }
                 .buttonStyle(ActionButtonStyle(tint: AppTheme.aqua))
 
-                GlassIconButton(
+                IconButton(
                     symbol: "arrow.clockwise",
                     action: { model.refreshBilling(force: true) },
                     isActive: model.isBillingLoading,
@@ -125,7 +123,6 @@ struct BillingView: View {
         return VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    EyebrowLabel(text: "Spending Pulse", tint: AppTheme.mint)
                     Text("近 \(rangeDays) 天消费")
                         .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(AppTheme.textPrimary)
@@ -144,16 +141,9 @@ struct BillingView: View {
 
             HStack(alignment: .lastTextBaseline, spacing: 8) {
                 Text(currency(total))
-                    .scaledFont(size: 37, weight: .bold, design: .rounded)
-                    .tracking(-1.2)
-                    .foregroundStyle(
-                        total > 0
-                            ? AnyShapeStyle(AppTheme.accentGradient)
-                            : AnyShapeStyle(AppTheme.textPrimary.opacity(0.82))
-                    )
+                    .scaledFont(size: 30, weight: .semibold)
+                    .foregroundStyle(AppTheme.textPrimary)
                     .monospacedDigit()
-                    .contentTransition(.numericText())
-                    .animation(.spring(response: 0.5, dampingFraction: 0.82), value: total)
 
             }
             .padding(.top, 10)
@@ -188,15 +178,7 @@ struct BillingView: View {
             }
         }
         .padding(18)
-        .glassPanel(cornerRadius: 24, tint: AppTheme.mint)
-        .overlay(alignment: .topTrailing) {
-            Circle()
-                .fill(AppTheme.mint.opacity(0.10))
-                .frame(width: 160, height: 160)
-                .blur(radius: 55)
-                .offset(x: 60, y: -70)
-                .allowsHitTesting(false)
-        }
+        .panel()
     }
 
     private var balanceCard: some View {
@@ -209,20 +191,18 @@ struct BillingView: View {
         return VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    EyebrowLabel(text: "Wallet", tint: AppTheme.aqua)
                     Text("账户余额")
                         .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(AppTheme.textPrimary)
                 }
                 Spacer()
-                Image(systemName: "wallet.bifold.fill")
-                    .scaledFont(size: 14, weight: .medium)
-                    .foregroundStyle(AppTheme.aqua.opacity(0.7))
+                Image(systemName: "wallet.bifold")
+                    .scaledFont(size: 13, weight: .regular)
+                    .foregroundStyle(AppTheme.textTertiary)
             }
 
             Text(model.balanceLabel)
-                .scaledFont(size: 31, weight: .bold, design: .rounded)
-                .tracking(-0.8)
+                .scaledFont(size: 26, weight: .semibold)
                 .foregroundStyle(AppTheme.textPrimary)
                 .monospacedDigit()
                 .padding(.top, 12)
@@ -257,7 +237,7 @@ struct BillingView: View {
             .padding(.top, 10)
         }
         .padding(18)
-        .glassPanel(cornerRadius: 24, tint: AppTheme.aqua)
+        .panel()
     }
 
     private func segment(width: CGFloat, color: Color) -> some View {
@@ -277,7 +257,7 @@ struct BillingView: View {
                     .foregroundStyle(AppTheme.textTertiary)
             }
             Text(value)
-                .scaledFont(size: 9.5, weight: .semibold, design: .rounded)
+                .scaledFont(size: 9.5, weight: .semibold)
                 .foregroundStyle(AppTheme.textSecondary)
                 .monospacedDigit()
                 .lineLimit(1)
@@ -289,12 +269,11 @@ struct BillingView: View {
     private func chartCard(_ snapshot: BillingSnapshot) -> some View {
         let days = snapshot.dailySeries(days: rangeDays)
         let activeDay = days.first { $0.date == hoveredDate } ?? days.last
-        let average = days.isEmpty ? 0 : days.reduce(0) { $0 + $1.amount } / Double(days.count)
+        let average = days.isEmpty ? 0 : max(0, days.reduce(0) { $0 + $1.net }) / Double(days.count)
 
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
-                    EyebrowLabel(text: "Daily Burn", tint: AppTheme.aqua)
                     Text("每日消费")
                         .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(AppTheme.textPrimary)
@@ -308,7 +287,7 @@ struct BillingView: View {
                             .scaledFont(size: 9, weight: .medium)
                             .foregroundStyle(AppTheme.textTertiary)
                         Text(currency(activeDay.amount))
-                            .scaledFont(size: 9.5, weight: .bold, design: .rounded)
+                            .scaledFont(size: 9.5, weight: .bold)
                             .foregroundStyle(AppTheme.textPrimary.opacity(0.86))
                             .monospacedDigit()
                     }
@@ -350,7 +329,7 @@ struct BillingView: View {
             .padding(.top, 8)
         }
         .padding(18)
-        .glassPanel(cornerRadius: 24, tint: AppTheme.aqua)
+        .panel()
     }
 
     private var rangeToggle: some View {
@@ -392,7 +371,6 @@ struct BillingView: View {
         return VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    EyebrowLabel(text: "Where It Goes", tint: AppTheme.violet)
                     Text("消费构成")
                         .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(AppTheme.textPrimary)
@@ -433,7 +411,6 @@ struct BillingView: View {
                             Circle()
                                 .fill(palette[index % palette.count])
                                 .frame(width: 6, height: 6)
-                                .shadow(color: palette[index % palette.count].opacity(0.5), radius: 3)
 
                             Text(slice.label)
                                 .scaledFont(size: 10.5, weight: .medium)
@@ -448,7 +425,7 @@ struct BillingView: View {
                                 .monospacedDigit()
 
                             Text(currency(slice.amount))
-                                .scaledFont(size: 10.5, weight: .semibold, design: .rounded)
+                                .scaledFont(size: 10.5, weight: .semibold)
                                 .foregroundStyle(AppTheme.textPrimary.opacity(0.86))
                                 .monospacedDigit()
                                 .frame(width: 70, alignment: .trailing)
@@ -478,14 +455,13 @@ struct BillingView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .glassPanel(cornerRadius: 24, tint: AppTheme.violet)
+        .panel()
     }
 
     private func recentBillsCard(_ snapshot: BillingSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    EyebrowLabel(text: "Recent Ledger", tint: AppTheme.amber)
                     Text("最近账单")
                         .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(AppTheme.textPrimary)
@@ -523,7 +499,7 @@ struct BillingView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .glassPanel(cornerRadius: 24, tint: AppTheme.amber)
+        .panel()
     }
 
     private var loadingCard: some View {
@@ -537,7 +513,7 @@ struct BillingView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 80)
-        .glassPanel(cornerRadius: 24, tint: AppTheme.amber)
+        .panel()
     }
 
     private var emptyCard: some View {
@@ -571,7 +547,7 @@ struct BillingView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 50)
-        .glassPanel(cornerRadius: 26, tint: AppTheme.amber)
+        .panel()
     }
 
     private func errorCard(_ error: String) -> some View {
@@ -594,7 +570,7 @@ struct BillingView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 52)
-        .glassPanel(cornerRadius: 26, tint: AppTheme.amber)
+        .panel()
     }
 
     private func warningBanner(_ message: String) -> some View {
@@ -614,7 +590,7 @@ struct BillingView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .glassPanel(cornerRadius: 14, tint: AppTheme.amber)
+        .panel(cornerRadius: 10)
     }
 
     private var summaryDivider: some View {
@@ -634,7 +610,7 @@ struct BillingView: View {
                 .scaledFont(size: 8.5, weight: .medium)
                 .foregroundStyle(AppTheme.textTertiary)
             Text(value)
-                .scaledFont(size: 13, weight: .bold, design: .rounded)
+                .scaledFont(size: 13, weight: .bold)
                 .foregroundStyle(tint)
                 .monospacedDigit()
                 .lineLimit(1)
@@ -673,7 +649,7 @@ private struct BillingRecordRow: View {
 
                     if record.discountAmount > 0 {
                         Text("省 \(AccountBalance.currency(record.discountAmount))")
-                            .scaledFont(size: 7.5, weight: .bold, design: .rounded)
+                            .scaledFont(size: 7.5, weight: .bold)
                             .foregroundStyle(AppTheme.mint.opacity(0.82))
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
@@ -690,7 +666,7 @@ private struct BillingRecordRow: View {
             Spacer(minLength: 6)
 
             Text(record.signedAmountLabel)
-                .scaledFont(size: 11, weight: .bold, design: .rounded)
+                .scaledFont(size: 11, weight: .bold)
                 .foregroundStyle(
                     record.billType.isOutflow
                         ? AppTheme.textPrimary.opacity(0.88)
@@ -744,22 +720,8 @@ private struct DailySpendChart: View {
                             VStack(spacing: 0) {
                                 Spacer(minLength: 0)
                                 RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                                    .fill(barGradient(isHovered: isHovered, isToday: isToday))
+                                    .fill(barColor(isHovered: isHovered, isToday: isToday))
                                     .frame(width: barWidth, height: height)
-                                    .overlay {
-                                        RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                                            .strokeBorder(
-                                                isHovered ? .white.opacity(0.55) : .white.opacity(0.06),
-                                                lineWidth: 0.6
-                                            )
-                                    }
-                                    .shadow(
-                                        color: isHovered
-                                            ? AppTheme.mint.opacity(0.55)
-                                            : (isToday ? AppTheme.amber.opacity(0.24) : .clear),
-                                        radius: 6,
-                                        y: 1
-                                    )
                             }
                             .frame(width: slot, height: geometry.size.height, alignment: .bottom)
                             .contentShape(Rectangle())
@@ -779,7 +741,7 @@ private struct DailySpendChart: View {
             HStack(spacing: days.count > 20 ? 3 : 6) {
                 ForEach(Array(days.enumerated()), id: \.element.id) { index, day in
                     Text(label(for: index, day: day))
-                        .scaledFont(size: 7.5, weight: .medium, design: .rounded)
+                        .scaledFont(size: 7.5, weight: .medium)
                         .foregroundStyle(
                             AppTime.calendar.isDateInToday(day.date)
                                 ? AppTheme.amber.opacity(0.85)
@@ -794,26 +756,10 @@ private struct DailySpendChart: View {
         }
     }
 
-    private func barGradient(isHovered: Bool, isToday: Bool) -> LinearGradient {
-        if isHovered {
-            return LinearGradient(
-                colors: [AppTheme.mint, AppTheme.aqua.opacity(0.72)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-        if isToday {
-            return LinearGradient(
-                colors: [AppTheme.amber.opacity(0.92), AppTheme.amber.opacity(0.34)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-        return LinearGradient(
-            colors: [AppTheme.mint.opacity(0.72), AppTheme.aqua.opacity(0.22)],
-            startPoint: .top,
-            endPoint: .bottom
-        )
+    private func barColor(isHovered: Bool, isToday: Bool) -> Color {
+        if isHovered { return AppTheme.mint }
+        if isToday { return AppTheme.amber.opacity(0.85) }
+        return AppTheme.mint.opacity(0.55)
     }
 
     private func gridLines(size: CGSize) -> some View {

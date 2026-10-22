@@ -17,10 +17,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/A2ureeE/CrazyAutoDL/releases/latest">
+  <a href="https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/latest">
     <img src="https://img.shields.io/badge/下载-macOS%20v1.2.0-34c759?style=for-the-badge&logo=apple&logoColor=white" alt="下载 macOS 版">
   </a>
-  <a href="https://github.com/A2ureeE/CrazyAutoDL/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-win-x64.exe">
+  <a href="https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-win-x64.exe">
     <img src="https://img.shields.io/badge/下载-Windows%20v1.2.0-0078d4?style=for-the-badge&logo=windows&logoColor=white" alt="下载 Windows 版">
   </a>
 </p>
@@ -77,8 +77,8 @@ AutoDL 的闲置 GPU 就像食堂最后一份糖醋排骨：犹豫几秒，就�
 | 资源余量 | 监控台用圆形仪表盘展示剩余内存与剩余存储 |
 | 余额监控 | 查询现金、冻结金额与代金券；低于阈值时只提醒一次 |
 | 账单看板 | 35 天账单同步、日消费柱状图、消费构成与流水明细 |
-| 菜单栏 / 托盘 | macOS 菜单栏面板可切换监控目标；Windows 托盘菜单可刷新、控制自动开机与检查更新 |
-| 应用内更新 | 自动检查 GitHub Release，在应用内下载、校验、重启安装，无需打开浏览器 |
+| 菜单栏 / 托盘 | macOS 菜单栏面板可切换监控目标；Windows 托盘菜单可刷新、暂停监控与控制自动开机 |
+| 暂停监控 | 一键暂停后台轮询、提醒与自动开机，嫌弹窗多时使用；手动刷新仍可查看数据 |
 | 系统通知 | 空闲卡、自动开机结果、余额不足与测试通知；macOS 使用 UserNotifications，Windows 使用 Toast |
 | 内嵌登录 | 在应用内完成 AutoDL 登录，自动捕获 Token，无需手动复制 |
 | 本地 Token | macOS 写入 `0600` 权限文件，不触发 Keychain 弹窗；Windows 使用 DPAPI 加密保存 |
@@ -103,12 +103,12 @@ AutoDL 的闲置 GPU 就像食堂最后一份糖醋排骨：犹豫几秒，就�
 
 ### 直接下载
 
-如果不想自己编译，可以前往 [Releases](https://github.com/A2ureeE/CrazyAutoDL/releases/latest) 下载最新版本：
+如果不想自己编译，可以前往 [Releases](https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/latest) 下载最新版本：
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| macOS | [`HuNaoAutoDL-1.2.0-arm64.dmg`](https://github.com/A2ureeE/CrazyAutoDL/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-arm64.dmg) / [`.zip`](https://github.com/A2ureeE/CrazyAutoDL/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-arm64.zip) | 要求 macOS 15 及以上、Apple Silicon |
-| Windows | [`HuNaoAutoDL-1.2.0-win-x64.exe`](https://github.com/A2ureeE/CrazyAutoDL/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-win-x64.exe) | 安装版，支持应用内自动更新 |
+| macOS | [`HuNaoAutoDL-1.2.0-arm64.dmg`](https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-arm64.dmg) / [`.zip`](https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-arm64.zip) | 要求 macOS 15 及以上、Apple Silicon |
+| Windows | [`HuNaoAutoDL-1.2.0-win-x64.exe`](https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-win-x64.exe) | 安装版，支持应用内自动更新 |
 
 macOS 应用使用 ad-hoc 签名、没有经过 Apple 公证，首次打开时系统可能会拦截。请在 Finder 中右键应用选择「打开」，或前往「系统设置 → 隐私与安全性」点击「仍要打开」。
 
@@ -119,7 +119,7 @@ Windows 安装包 SHA-256：`f7265fc41ad9bdd6912244e7e38e514103b8be4d0bbb68c5e5f
 ### 从源码构建 macOS
 
 ```bash
-git clone https://github.com/A2ureeE/CrazyAutoDL.git
+git clone https://github.com/zhuhaoxiang1/CrazyAutoDL-v2.git
 cd CrazyAutoDL
 
 # 编译、打包并 ad-hoc 签名
@@ -143,7 +143,7 @@ open "/Applications/胡闹AutoDL.app"
 需要 Node.js 22 或更高版本：
 
 ```powershell
-git clone https://github.com/A2ureeE/CrazyAutoDL.git
+git clone https://github.com/zhuhaoxiang1/CrazyAutoDL-v2.git
 cd CrazyAutoDL\windows
 
 npm ci
@@ -160,6 +160,17 @@ npm run dist
 
 也可以切换到手动输入，直接填写已有 Token。退出账户时，本地 Token 会被删除，监控随即停止。
 
+本地兼容修复：登录时若主账号实例接口返回「无当前资源访问权限」，会改用子账号接口验证。验证成功后，实例、库存、钱包、账单和开关机请求统一使用 `/api/v1/sub_user` 路径，账号类型随本地 Token 一起保存。旧版纯文本 Token 文件仍可读取；实际可用操作仍取决于主账号分配的权限。此修复不增加区域监控功能。
+
+子账号兼容的离线回归检查：`zsh HuNaoAutoDL/scripts/test-sub-account.sh`（请求由本地模拟拦截，不访问真实账户）。
+
+其余离线回归检查（均不访问真实账户、不改动真实设置）：
+
+- macOS：`zsh HuNaoAutoDL/scripts/test-monitor.sh`（监控、开机互斥、会话隔离、库存分页、退款口径）、`test-accounts.sh`、`test-region-alerts.sh`
+- Windows：`cd windows && npm test`（引擎、请求超时、凭证存储、账单口径）
+
+相关设计文档：[docs/claude-codex-integration-changes.md](docs/claude-codex-integration-changes.md)
+
 ### 2. 选择监控目标
 
 进入「我的实例」，在实例卡片右侧点击「监控此实例」。监控台会围绕该实例所在的主机与 GPU 池工作。
@@ -174,9 +185,9 @@ npm run dist
 
 ### 4. 管理实例
 
-实例卡片提供开机、关机与「释放」按钮。
+实例卡片提供开机、关机与「设为目标」按钮。
 
-「释放」不会在应用内直接执行，而是打开 AutoDL 控制台的实例列表，由你在网页中手动确认。释放会销毁实例和数据，这个确认步骤必须留给你自己。
+应用里没有「释放」按钮，避免误触销毁实例。需要释放时，请到 AutoDL 官方控制台操作。
 
 ### 5. 查看账单
 
@@ -188,30 +199,26 @@ macOS 版本点击菜单栏图标会弹出快捷面板，Windows 版本右键点
 
 - 查看当前监控状态与上次更新时间
 - macOS 可快速切换监控目标
-- 开关自动开机
+- 开关自动开机、暂停 / 恢复监控
 - 打开主窗口或刷新数据
-- 检查更新、前往 GitHub 点 Star
 
 关闭主窗口后应用仍会在菜单栏或托盘中运行，自动开机监控不会中断。
 
-### 7. 应用内更新
+### 7. 暂停监控
 
-应用每 24 小时自动检查一次新版本，也可以随时在「设置 → 版本更新」或菜单栏右键菜单中手动检查。
+「监控台」右上角、菜单栏 / 托盘菜单都有「暂停监控」。暂停后：
 
-发现新版本后，下载、校验和安装都在应用内完成：
+- 不再后台轮询，不弹空闲 GPU、余额不足、区域提醒等通知，也不会触发自动开机。
+- 「立即刷新」仍可手动查看最新数据；手动开关机不受影响。
+- 暂停状态会保存，重启后保持；点「恢复监控」后立即刷新一次，此刻有空闲卡会照常提醒。
 
-- 下载过程显示实时进度条，可随时取消。
-- macOS 安装包先校验 GitHub 提供的 SHA-256 摘要，再核对 Bundle ID、版本号与代码签名；Windows 版通过 `latest.yml` 与 `.exe.blockmap` 完成增量下载与安装。
-- 校验通过后点击「重启并安装」，应用会自动退出、替换旧版本并重新打开，无需拖拽或访问 GitHub。
-- 下载与校验期间，更新卡片会展示 Star 引导，欢迎顺手支持作者。
-
-> 1.1.1 及更早版本没有内置更新器，需要手动下载一次 1.2.0；从 1.2.0 起即可在应用内完成后续更新。
+本版本不含应用内更新和「关于」页，请自行获取新构建。
 
 ## 数据与隐私
 
 - macOS：Token 保存在 `~/Library/Application Support/HuNaoAutoDL/session.token`，文件权限 `0600`，目录权限 `0700`，并标记为不参与备份。不使用 Keychain，因此不会反复弹出系统密码框。
 - Windows：Token 使用系统 DPAPI 加密后写入 `%APPDATA%\胡闹AutoDL\config.json`（不可用时回退为本地文件）。设置、监控目标与更新时间也保存在同一文件中。
-- 应用只向 `https://www.autodl.com` 发起账户请求；检查更新与下载安装包时仅访问 `https://api.github.com` 和 `https://github.com`，不经过任何第三方服务器。
+- 应用只向 `https://www.autodl.com` 发起账户请求；本版本不含更新检查，不访问其他服务器。
 - 通知由系统本地通知框架发送（macOS UserNotifications / Windows Toast），不上传设备信息。
 - 退出登录会同时删除本地 Token，并清空内嵌登录网页的 Cookie、缓存与站点数据。
 - `--demo` 演示模式使用内置数据，不发起网络请求，也不会读写你的 Token。
@@ -255,7 +262,7 @@ open -n "dist/胡闹AutoDL.app" --args --demo --section=billing
 npm run demo
 ```
 
-演示模式包含三个虚构实例、GPU 池余量、账户余额与 35 天账单，适合截图、录屏或界面开发。它不会请求 AutoDL，也不会触发更新检查。
+演示模式包含三个虚构实例、GPU 池余量、账户余额与 35 天账单，适合截图、录屏或界面开发。它不会请求 AutoDL。
 
 ### 项目结构
 
@@ -270,14 +277,13 @@ CrazyAutoDL/
 │   │   ├── Models.swift        # 实例、余额、账单模型
 │   │   ├── DemoData.swift      # 演示数据
 │   │   ├── TokenStore.swift    # 本地 Token 存储
-│   │   ├── UpdateService.swift # 更新检查、下载、校验与安装
 │   │   ├── LoginWebView.swift
 │   │   ├── NotificationService.swift
 │   │   ├── MenuBarController.swift
 │   │   └── Views/              # 监控台、实例、账单、设置、快捷面板
 │   └── scripts/build-app.sh
 ├── windows/                    # Windows Electron 应用
-│   ├── src/main/               # 主进程：API、引擎、存储、登录、更新
+│   ├── src/main/               # 主进程：API、引擎、存储、登录
 │   ├── src/renderer/           # 界面：HTML / CSS / JavaScript
 │   ├── assets/                 # 品牌图片
 │   ├── build/                  # 应用图标
@@ -287,10 +293,6 @@ CrazyAutoDL/
 ```
 
 ## 常见问题
-
-**为什么点击「释放」打开的是网页？**
-
-释放会永久销毁实例与磁盘数据，属于不可撤销操作，因此应用不做二次确认式的直接调用，而是把你带到 AutoDL 官方控制台完成确认。
 
 **为什么实例没有显示释放时间？**
 
@@ -314,7 +316,7 @@ Windows 版没有购买代码签名证书，SmartScreen 会显示「Windows 已�
 
 **会自动释放实例吗？**
 
-不会。应用只会开机、关机，以及跳转网页让你手动释放。任何销毁数据的操作都需要你本人在 AutoDL 控制台确认。
+不会。应用只会开机和关机，也没有释放入口。任何销毁数据的操作都需要你本人在 AutoDL 控制台完成。
 
 **Token 会被上传吗？**
 
@@ -330,12 +332,12 @@ Windows 版没有购买代码签名证书，SmartScreen 会显示「Windows 已�
 
 ## 作者
 
-由 [A2ureeE](https://github.com/A2ureeE) 开发并维护。
+原项目由 [A2ureeE](https://github.com/A2ureeE/CrazyAutoDL) 开发，本仓库为其 V2 二次开发版本。
 
 如果它帮你抢到过一张显卡，欢迎去仓库点个 Star：
 
 <p align="center">
-  <a href="https://github.com/A2ureeE/CrazyAutoDL">
+  <a href="https://github.com/zhuhaoxiang1/CrazyAutoDL-v2">
     <img src="https://img.shields.io/badge/Star-CrazyAutoDL-f5a623?style=for-the-badge&logo=github&logoColor=white" alt="Star CrazyAutoDL">
   </a>
 </p>

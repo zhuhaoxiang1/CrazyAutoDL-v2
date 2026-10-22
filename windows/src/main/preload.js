@@ -26,13 +26,11 @@ contextBridge.exposeInMainWorld('hunao', {
   powerOff: (id) => ipcRenderer.invoke('instance:power-off', id),
 
   setAutoStart: (enabled) => ipcRenderer.invoke('settings:auto-start', enabled),
+  setMonitoringPaused: (paused) => ipcRenderer.invoke('settings:monitoring-paused', paused),
   setPollInterval: (seconds) => ipcRenderer.invoke('settings:poll-interval', seconds),
   setLowBalanceThreshold: (value) => ipcRenderer.invoke('settings:low-balance', value),
   testNotification: () => ipcRenderer.invoke('notifications:test'),
 
-  updateCheck: () => ipcRenderer.invoke('update:check'),
-  updateDownload: () => ipcRenderer.invoke('update:download'),
-  updateInstall: () => ipcRenderer.invoke('update:install'),
 
   copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),

@@ -49,7 +49,10 @@ class Engine extends EventEmitter {
     this.signedInAt = null;
     this.actionInstanceId = null;
     this.isAutoStarting = false;
+    this.autoStartingId = null;
     this.autoStartEnabled = store.autoStartEnabled;
+    // While paused nothing polls in the background and nothing alerts or auto-starts; a manual refresh still shows data.
+    this.monitoringPaused = Boolean(store.monitoringPaused);
     this.pollInterval = store.pollingInterval;
     this.lowBalanceThreshold = store.lowBalanceThreshold;
     this.gpuWasAvailable = false;
@@ -59,6 +62,17 @@ class Engine extends EventEmitter {
     this.consecutiveErrors = 0;
     this.activitySequence = 0;
     this.monitorGeneration = 0;
+    // Bumped whenever the signed-in session changes (login, logout, expiry). Every async path captures it up front and
+    // drops its result, errors included, if it no longer matches, so a late reply from an old session cannot touch the new one.
+    this.sessionId = 0;
+    // Bumped whenever the monitored target changes, so a stock reply fetched for the old target is never applied to the new one.
+    this.targetVersion = 0;
+    // Set while the selected instance has dropped out of the list: automation stays paused until the user picks a target.
+    this.targetLost = null;
+    // Instance ids with a power request in flight or awaiting confirmation. Manual and automatic power-ons share it.
+    this.busy = new Set();
+    this.refreshLoop = null;
+    this.pendingRefresh = false;
     this.monitorStopped = true;
     this.destroyed = false;
 
@@ -67,6 +81,10 @@ class Engine extends EventEmitter {
       this.applyDemo();
       return;
     }
+
+    store.onSaveError = (error) => {
+      this.emitToast('error', '设置未能保存', `写入本地配置失败，重启后可能恢复旧值：${error && error.message ? error.message : error}`);
+    };
 
     const savedToken = store.getToken();
     if (savedToken) {
@@ -106,6 +124,22 @@ class Engine extends EventEmitter {
 
   // ---------------------------------------------------------------- session
 
+  isCurrent(sid) {
+    return sid === this.sessionId && this.phase === 'signedIn' && !this.destroyed;
+  }
+
+  // Drops all in-flight bookkeeping when the session changes; stale callbacks are filtered by sessionId.
+  resetOperations() {
+    this.refreshLoop = null;
+    this.pendingRefresh = false;
+    this.isRefreshing = false;
+    this.isBillingLoading = false;
+    this.isAutoStarting = false;
+    this.autoStartingId = null;
+    this.actionInstanceId = null;
+    this.busy.clear();
+  }
+
   async connectWithToken(rawToken, { persist, bootstrap } = {}) {
     const candidate = String(rawToken || '').trim();
     if (!candidate) return { ok: false, error: '请输入 AutoDL Token' };
@@ -115,12 +149,14 @@ class Engine extends EventEmitter {
     this.loginError = null;
     this.emitState();
 
+    const startSid = this.sessionId;
     const api = new AutoDLAPI(candidate);
     try {
       const list = await api.fetchInstances();
+      this.sessionId += 1;
+      this.resetOperations();
       this.token = candidate;
       this.tokenHint = maskToken(candidate);
-      if (persist) this.store.saveToken(candidate);
       this.phase = 'signedIn';
       this.signedInAt = new Date();
       this.loginError = null;
@@ -134,6 +170,11 @@ class Engine extends EventEmitter {
       if (list.length === 0) {
         this.addActivity('info', '账号下暂无实例', '请先在 AutoDL 控制台创建实例');
       }
+      if (persist && !this.store.saveToken(candidate)) {
+        const detail = '本次登录有效，但凭证未能写入本地，下次启动需要重新登录。';
+        this.addActivity('warning', '凭证未能保存', detail);
+        this.emitToast('warning', '凭证未能保存', detail);
+      }
       this.isLoggingIn = false;
       this.emitState();
       this.startMonitoring(true);
@@ -143,7 +184,7 @@ class Engine extends EventEmitter {
       this.isLoggingIn = false;
       if (error instanceof AutoDLError && error.isAuthFailure) {
         if (bootstrap) {
-          this.expireSession(message);
+          this.expireSession(message, startSid);
         } else {
           this.loginError = 'Token 无效或已过期，请重新登录 AutoDL';
           this.emitState();
@@ -152,6 +193,8 @@ class Engine extends EventEmitter {
       }
 
       if (bootstrap) {
+        this.sessionId += 1;
+        this.resetOperations();
         this.token = candidate;
         this.tokenHint = maskToken(candidate);
         this.phase = 'signedIn';
@@ -173,45 +216,61 @@ class Engine extends EventEmitter {
     return this.connectWithToken(rawToken, { persist: true, bootstrap: false });
   }
 
+  // Wipes the stored credential and reports a failure to the user: a token that is still on disk after sign-out
+  // would silently log the next launch back in.
+  clearStoredCredential() {
+    const removed = this.store.deleteToken();
+    this.onSessionCleared();
+    if (!removed) {
+      const detail = '本地凭证删除失败，下次启动可能仍会自动登录。请检查磁盘空间或文件权限，或手动删除配置文件。';
+      this.loginError = detail;
+      this.emitToast('error', '本地凭证删除失败', detail);
+    }
+    return removed;
+  }
+
   logout() {
     if (this.demoMode) {
       this.emitToast('info', '演示模式', '演示数据不会退出登录。');
       return;
     }
     this.stopMonitoring();
+    this.sessionId += 1;
+    this.resetOperations();
     this.token = null;
     this.tokenHint = '';
-    this.store.deleteToken();
-    this.onSessionCleared();
     this.phase = 'loggedOut';
     this.signedInAt = null;
     this.instances = [];
     this.selectedInstanceId = null;
+    this.targetLost = null;
+    this.targetVersion += 1;
     this.stock = null;
     this.lastUpdated = null;
     this.lastError = null;
     this.loginError = null;
-    this.isRefreshing = false;
     this.activity = [];
     this.balance = null;
     this.balanceError = null;
     this.billing = null;
     this.billingError = null;
-    this.isBillingLoading = false;
     this.gpuWasAvailable = false;
     this.didNotifyForAvailability = false;
     this.didNotifyForLowBalance = false;
     this.lastAutoAttemptAt = null;
     this.store.setSelectedInstance(null);
+    this.clearStoredCredential();
     this.emitState();
   }
 
-  expireSession(reason) {
+  // `sid` is the session the caller was working for; an expiry reported by a request from an older session is ignored.
+  expireSession(reason, sid) {
+    if (sid !== undefined && sid !== this.sessionId) return;
     this.stopMonitoring();
+    this.sessionId += 1;
+    this.resetOperations();
     this.token = null;
     this.tokenHint = '';
-    this.store.deleteToken();
-    this.onSessionCleared();
     this.phase = 'loggedOut';
     this.signedInAt = null;
     this.stock = null;
@@ -219,11 +278,11 @@ class Engine extends EventEmitter {
     this.balanceError = null;
     this.billing = null;
     this.billingError = null;
-    this.isBillingLoading = false;
     this.didNotifyForLowBalance = false;
     this.lastUpdated = null;
-    this.isRefreshing = false;
     this.loginError = reason;
+    this.clearStoredCredential();
+    if (this.loginError !== reason) this.loginError = `${reason}（${this.loginError}）`;
     this.addActivity('error', '登录已失效', reason);
     this.emitToast('error', '登录已失效', '请重新连接 AutoDL');
     this.emitState();
@@ -241,6 +300,7 @@ class Engine extends EventEmitter {
       while (!this.monitorStopped && generation === this.monitorGeneration) {
         await delay(Math.max(this.pollInterval, MIN_POLL_INTERVAL) * 1000);
         if (this.monitorStopped || generation !== this.monitorGeneration) return;
+        if (this.monitoringPaused) continue;
         await this.refreshAll(false);
       }
     };
@@ -264,17 +324,40 @@ class Engine extends EventEmitter {
     this.refreshAll(true);
   }
 
-  async refreshAll(userInitiated = false) {
-    if (this.demoMode || this.phase !== 'signedIn' || !this.token) return;
-    if (this.isRefreshing) return;
+  // One loop at a time. A call made while a refresh is running queues exactly one more pass and resolves when the
+  // whole loop is done, so a target switch or a post-power-action check always ends up reading fresh data.
+  refreshAll(userInitiated = false) {
+    if (this.demoMode || this.phase !== 'signedIn' || !this.token) return Promise.resolve();
+    if (this.refreshLoop) {
+      this.pendingRefresh = true;
+      return this.refreshLoop;
+    }
 
+    const sid = this.sessionId;
+    const loop = (async () => {
+      try {
+        let first = userInitiated;
+        do {
+          this.pendingRefresh = false;
+          await this.refreshOnce(sid, first);
+          first = false;
+        } while (this.pendingRefresh && this.isCurrent(sid));
+      } finally {
+        if (this.refreshLoop === loop) this.refreshLoop = null;
+      }
+    })();
+    this.refreshLoop = loop;
+    return loop;
+  }
+
+  async refreshOnce(sid, userInitiated) {
     const token = this.token;
     this.isRefreshing = true;
     this.emitState();
 
     try {
       const list = await new AutoDLAPI(token).fetchInstances();
-      if (this.token !== token || this.phase !== 'signedIn') return;
+      if (!this.isCurrent(sid)) return;
 
       this.applyInstances(list);
       this.lastError = null;
@@ -282,13 +365,14 @@ class Engine extends EventEmitter {
 
       try {
         const latestBalance = await new AutoDLAPI(token).fetchBalance();
-        if (this.token !== token || this.phase !== 'signedIn') return;
+        if (!this.isCurrent(sid)) return;
         this.balance = latestBalance;
         this.balanceError = null;
         this.evaluateBalanceAlert();
       } catch (error) {
+        if (!this.isCurrent(sid)) return;
         if (error instanceof AutoDLError && error.isAuthFailure) {
-          this.expireSession(userMessage(error));
+          this.expireSession(userMessage(error), sid);
           return;
         }
         this.balanceError = userMessage(error);
@@ -301,25 +385,31 @@ class Engine extends EventEmitter {
         return;
       }
 
+      const targetVersion = this.targetVersion;
       try {
         const latestStock = await new AutoDLAPI(token).fetchGPUStock(selected);
-        if (this.token !== token || this.phase !== 'signedIn') return;
+        if (!this.isCurrent(sid) || targetVersion !== this.targetVersion) return;
+        const current = this.selectedInstance;
+        if (!current || !stockMatches(latestStock, current)) return;
         this.stock = latestStock;
         this.lastUpdated = new Date();
-        this.evaluateStock(latestStock, selected);
+        this.evaluateStock(latestStock, current);
       } catch (error) {
+        if (!this.isCurrent(sid)) return;
         if (error instanceof AutoDLError && error.isAuthFailure) {
-          this.expireSession(userMessage(error));
+          this.expireSession(userMessage(error), sid);
           return;
         }
+        if (targetVersion !== this.targetVersion) return;
         this.lastError = `显卡状态同步失败：${userMessage(error)}`;
         this.stock = null;
         this.lastUpdated = new Date();
         this.registerFailure(this.lastError);
       }
     } catch (error) {
+      if (!this.isCurrent(sid)) return;
       if (error instanceof AutoDLError && error.isAuthFailure) {
-        this.expireSession(userMessage(error));
+        this.expireSession(userMessage(error), sid);
         return;
       }
       this.lastError = userMessage(error);
@@ -328,8 +418,10 @@ class Engine extends EventEmitter {
         this.emitToast('error', '同步失败', this.lastError);
       }
     } finally {
-      this.isRefreshing = false;
-      this.emitState();
+      if (sid === this.sessionId) {
+        this.isRefreshing = false;
+        this.emitState();
+      }
     }
   }
 
@@ -348,6 +440,7 @@ class Engine extends EventEmitter {
       return;
     }
 
+    const sid = this.sessionId;
     const token = this.token;
     this.isBillingLoading = true;
     this.emitState();
@@ -355,59 +448,85 @@ class Engine extends EventEmitter {
     try {
       const { start, end } = defaultBillingRange();
       const records = await new AutoDLAPI(token).fetchBills(start, end);
-      if (this.token !== token || this.phase !== 'signedIn') return;
+      if (!this.isCurrent(sid)) return;
       this.billing = new BillingSnapshot(records, new Date());
       this.billingError = null;
     } catch (error) {
+      if (!this.isCurrent(sid)) return;
       if (error instanceof AutoDLError && error.isAuthFailure) {
-        this.expireSession(userMessage(error));
+        this.expireSession(userMessage(error), sid);
         return;
       }
-      if (this.token !== token || this.phase !== 'signedIn') return;
       this.billingError = userMessage(error);
     } finally {
-      this.isBillingLoading = false;
-      this.emitState();
+      if (sid === this.sessionId) {
+        this.isBillingLoading = false;
+        this.emitState();
+      }
     }
   }
 
   // --------------------------------------------------------------- selection
 
   applyInstances(list) {
-    this.instances = list;
+    const previousList = this.instances;
     const previousSelection = this.selectedInstanceId;
     const stored = this.store.selectedInstanceId;
+    this.instances = list;
 
-    let next = list.find((instance) => instance.id === stored) || null;
-    if (!next && previousSelection) {
-      next = list.find((instance) => instance.id === previousSelection) || null;
+    // Only the very first pick may fall back to the head of the list. Once a target exists and then goes missing
+    // (released, or just absent from one response), keep it, pause automation and make the user choose again; silently
+    // moving to another instance could power on something they never selected.
+    const wanted = [stored, previousSelection].filter(Boolean);
+    const next = wanted.map((id) => list.find((instance) => instance.id === id)).find(Boolean) || null;
+    const wasLost = Boolean(this.targetLost);
+
+    if (next) {
+      this.selectedInstanceId = next.id;
+      this.targetLost = null;
+      if (next.id !== stored) this.store.setSelectedInstance(next.id);
+      if (wasLost) this.addActivity('info', '监控目标已恢复', `${next.name} 重新出现在实例列表中`);
+    } else if (wanted.length > 0) {
+      this.selectedInstanceId = wanted[0];
+      if (!wasLost) {
+        const known = previousList.find((instance) => wanted.includes(instance.id));
+        const name = known ? known.name : wanted[0];
+        this.targetLost = { id: wanted[0], name };
+        this.addActivity('warning', '监控目标已消失', `${name} 不在实例列表中，已暂停自动开机，请重新选择监控目标`);
+        this.emitToast('warning', '监控目标已消失', `${name} 不在实例列表中，已暂停自动开机。`);
+      }
+    } else {
+      const first = list[0] || null;
+      this.selectedInstanceId = first ? first.id : null;
+      this.targetLost = null;
+      if (first) this.store.setSelectedInstance(first.id);
     }
-    if (!next) next = list[0] || null;
 
-    this.selectedInstanceId = next ? next.id : null;
-    if (next && next.id !== stored) this.store.setSelectedInstance(next.id);
-
-    if ((next ? next.id : null) !== previousSelection) {
-      this.stock = null;
-      this.lastUpdated = null;
-      this.gpuWasAvailable = false;
-      this.didNotifyForAvailability = false;
-      this.lastAutoAttemptAt = null;
-    }
+    const effective = this.selectedInstance ? this.selectedInstanceId : null;
+    const previousEffective = previousList.some((instance) => instance.id === previousSelection)
+      ? previousSelection
+      : null;
+    if (effective !== previousEffective) this.resetTargetState();
   }
 
-  selectInstance(id) {
-    if (id === this.selectedInstanceId) return;
-    const instance = this.instances.find((item) => item.id === id);
-    if (!instance) return;
-    this.selectedInstanceId = id;
-    this.store.setSelectedInstance(id);
+  resetTargetState() {
+    this.targetVersion += 1;
     this.stock = null;
     this.lastUpdated = null;
-    this.lastError = null;
     this.gpuWasAvailable = false;
     this.didNotifyForAvailability = false;
     this.lastAutoAttemptAt = null;
+  }
+
+  selectInstance(id) {
+    if (id === this.selectedInstanceId && !this.targetLost) return;
+    const instance = this.instances.find((item) => item.id === id);
+    if (!instance) return;
+    this.selectedInstanceId = id;
+    this.targetLost = null;
+    this.store.setSelectedInstance(id);
+    this.resetTargetState();
+    this.lastError = null;
     this.addActivity('info', '已切换监控目标', `${instance.name} · ${instance.gpuName}`);
     this.emitState();
     if (!this.demoMode) this.refreshAll(true);
@@ -421,8 +540,8 @@ class Engine extends EventEmitter {
   // -------------------------------------------------------------- automation
 
   evaluateStock(stock, instance) {
-    const available =
-      stock.machineFound && stock.idleGPUs > 0 && stock.idleGPUs >= Math.max(stock.requiredGPUs, 1);
+    if (this.monitoringPaused || !stockMatches(stock, instance)) return;
+    const available = stockAvailable(stock);
     const isPoweredOff = instanceState(instance.rawStatus) === 'stopped';
 
     if (available && !this.gpuWasAvailable) {
@@ -469,11 +588,9 @@ class Engine extends EventEmitter {
       this.addActivity('info', '自动开机已开启', '检测到空闲显卡后自动抢占');
       const instance = this.selectedInstance;
       if (instance && instanceState(instance.rawStatus) === 'stopped' && this.stock) {
-        const available =
-          this.stock.machineFound &&
-          this.stock.idleGPUs > 0 &&
-          this.stock.idleGPUs >= Math.max(this.stock.requiredGPUs, 1);
-        if (available) this.attemptAutoPowerOn(instance, this.stock);
+        if (stockMatches(this.stock, instance) && stockAvailable(this.stock)) {
+          this.attemptAutoPowerOn(instance, this.stock);
+        }
       }
     } else {
       this.addActivity('info', '自动开机已关闭', '之后仅在有卡空闲时提醒');
@@ -491,6 +608,23 @@ class Engine extends EventEmitter {
       }
     }
     this.emitState();
+  }
+
+  setMonitoringPaused(paused) {
+    const next = Boolean(paused);
+    if (this.monitoringPaused === next) return;
+    this.monitoringPaused = next;
+    if (!this.demoMode) this.store.setMonitoringPaused(next);
+    if (next) {
+      this.addActivity('info', '监控已暂停', '不再后台轮询，也不会提醒或自动开机');
+    } else {
+      // Start a fresh episode so a card that is free right now is reported once on resume.
+      this.gpuWasAvailable = false;
+      this.didNotifyForAvailability = false;
+      this.addActivity('info', '监控已恢复', '重新开始轮询与提醒');
+    }
+    this.emitState();
+    if (!next && !this.demoMode && this.phase === 'signedIn') this.refreshAll(false);
   }
 
   setPollInterval(seconds) {
@@ -520,7 +654,7 @@ class Engine extends EventEmitter {
   }
 
   evaluateBalanceAlert() {
-    if (!this.balance) return;
+    if (!this.balance || this.monitoringPaused) return;
     const available = Math.max(0, this.balance.cash) + Math.max(0, this.balance.voucher);
     if (available >= this.lowBalanceThreshold) {
       this.didNotifyForLowBalance = false;
@@ -540,43 +674,78 @@ class Engine extends EventEmitter {
     this.notifyHook({ title, body, tag: 'balance-low' });
   }
 
+  // Marks an instance as having a power request outstanding. Held from sending the request until the follow-up
+  // refresh has had a chance to show the new status, so a second request cannot race the first.
+  claimInstance(sid, id) {
+    if (sid !== this.sessionId || this.busy.has(id)) return false;
+    this.busy.add(id);
+    return true;
+  }
+
+  releaseInstance(sid, id) {
+    if (sid !== this.sessionId) return;
+    this.busy.delete(id);
+    if (this.actionInstanceId === id) this.actionInstanceId = null;
+    if (this.autoStartingId === id) {
+      this.autoStartingId = null;
+      this.isAutoStarting = false;
+    }
+    this.emitState();
+  }
+
+  confirmThenRelease(sid, id, waitMs) {
+    setTimeout(async () => {
+      try {
+        if (this.isCurrent(sid)) await this.refreshAll(false);
+      } catch (error) {
+        console.error('[engine] post-power refresh failed:', error);
+      } finally {
+        this.releaseInstance(sid, id);
+      }
+    }, waitMs);
+  }
+
   async attemptAutoPowerOn(instance, stock) {
     if (this.demoMode) return;
-    if (!this.autoStartEnabled || this.phase !== 'signedIn' || this.isAutoStarting) return;
-    if (instance.id !== this.selectedInstanceId) return;
-    if (instanceState(instance.rawStatus) !== 'stopped') return;
-    const available =
-      stock.machineFound && stock.idleGPUs > 0 && stock.idleGPUs >= Math.max(stock.requiredGPUs, 1);
-    if (!available) return;
+    if (!this.autoStartEnabled || this.monitoringPaused || this.phase !== 'signedIn') return;
+    const current = this.selectedInstance;
+    if (!current || current.id !== instance.id || this.targetLost) return;
+    if (instanceState(current.rawStatus) !== 'stopped') return;
+    if (!stockMatches(stock, current) || !stockAvailable(stock)) return;
     if (this.lastAutoAttemptAt && Date.now() - this.lastAutoAttemptAt.getTime() < AUTO_START_COOLDOWN_MS) {
       return;
     }
 
     const token = this.token;
-    if (!token) return;
+    const sid = this.sessionId;
+    if (!token || !this.claimInstance(sid, current.id)) return;
     this.isAutoStarting = true;
+    this.autoStartingId = current.id;
     this.lastAutoAttemptAt = new Date();
     this.emitState();
 
+    let confirming = false;
     try {
-      await new AutoDLAPI(token).powerOn(instance.id);
+      await new AutoDLAPI(token).powerOn(current.id);
+      if (sid !== this.sessionId) return;
       const title = '自动开机成功';
-      const detail = `${instance.name} 正在启动，已抢占 ${stock.idleGPUs} 张空闲 ${instance.gpuName}`;
+      const detail = `${current.name} 正在启动，已抢占 ${stock.idleGPUs} 张空闲 ${current.gpuName}`;
       this.addActivity('success', title, detail);
       this.emitToast('success', title, detail);
-      this.notifyHook({ title, body: detail, tag: `autostart-${instance.id}` });
-      setTimeout(() => this.refreshAll(false), 2500);
+      this.notifyHook({ title, body: detail, tag: `autostart-${current.id}` });
+      confirming = true;
+      this.confirmThenRelease(sid, current.id, 2500);
     } catch (error) {
+      if (sid !== this.sessionId) return;
       if (error instanceof AutoDLError && error.isAuthFailure) {
-        this.expireSession(userMessage(error));
+        this.expireSession(userMessage(error), sid);
         return;
       }
       const detail = userMessage(error);
       this.addActivity('error', '自动开机失败', detail);
       this.emitToast('error', '自动开机失败', detail);
     } finally {
-      this.isAutoStarting = false;
-      this.emitState();
+      if (!confirming) this.releaseInstance(sid, current.id);
     }
   }
 
@@ -586,23 +755,32 @@ class Engine extends EventEmitter {
       this.applyDemoPowerAction(instance, turnOn);
       return;
     }
-    if (this.phase !== 'signedIn' || this.actionInstanceId || !this.token) return;
+    if (this.phase !== 'signedIn' || !this.token) return;
 
     const token = this.token;
+    const sid = this.sessionId;
+    if (!this.claimInstance(sid, instance.id)) {
+      this.emitToast('info', '实例正在处理指令', `${instance.name} 上一条开关机请求尚未完成，请稍候。`);
+      return;
+    }
     this.actionInstanceId = instance.id;
     this.emitState();
 
+    let confirming = false;
     try {
       const api = new AutoDLAPI(token);
       if (turnOn) await api.powerOn(instance.id);
       else await api.powerOff(instance.id);
+      if (sid !== this.sessionId) return;
       const title = turnOn ? '开机指令已发送' : '关机指令已发送';
       this.addActivity('success', title, instance.name);
       this.emitToast('success', title, `${instance.name} 状态将在几秒后同步。`);
-      setTimeout(() => this.refreshAll(false), 2000);
+      confirming = true;
+      this.confirmThenRelease(sid, instance.id, 2000);
     } catch (error) {
+      if (sid !== this.sessionId) return;
       if (error instanceof AutoDLError && error.isAuthFailure) {
-        this.expireSession(userMessage(error));
+        this.expireSession(userMessage(error), sid);
         return;
       }
       const title = turnOn ? '开机失败' : '关机失败';
@@ -610,8 +788,7 @@ class Engine extends EventEmitter {
       this.addActivity('error', title, message);
       this.emitToast('error', title, message);
     } finally {
-      this.actionInstanceId = null;
-      this.emitState();
+      if (!confirming) this.releaseInstance(sid, instance.id);
     }
   }
 
@@ -717,13 +894,19 @@ class Engine extends EventEmitter {
         headline = this.lastError ? '显卡状态暂不可用' : '正在读取显卡状态';
         caption = `刷新间隔 ${this.pollInterval} 秒`;
       } else if (state === 'running') {
-        headline = '实例正在使用 GPU';
+        headline = selected.isNoCardMode
+          ? '实例以无卡模式运行'
+          : selected.isGPUMode
+            ? '实例正在使用 GPU'
+            : '实例运行中';
       } else if (state === 'starting') {
         headline = '实例正在启动';
       } else if (state === 'stopping') {
         headline = '实例正在关机';
       } else if (stock.isAvailable) {
         headline = '发现空闲显卡';
+      } else if (stock.incomplete) {
+        headline = '库存查询不完整';
       } else if (!stock.machineFound) {
         headline = '目标主机暂未放出空卡';
       } else {
@@ -733,6 +916,8 @@ class Engine extends EventEmitter {
       if (stock) {
         if (stock.isAvailable) {
           caption = this.autoStartEnabled ? '自动开机已就绪' : '自动开机已关闭，仅发送提醒';
+        } else if (stock.incomplete) {
+          caption = `目标主机不在已查询的结果页内，无法判断是否有空卡`;
         } else if (!stock.machineFound) {
           caption = `目标主机 ${selectedRaw.machineID || 'ID 缺失'} 暂无空闲卡`;
         } else {
@@ -741,9 +926,25 @@ class Engine extends EventEmitter {
       }
     }
 
+    if (!selected && this.targetLost) {
+      headline = '监控目标已消失';
+      caption = `「${this.targetLost.name}」不在实例列表中，已暂停自动开机，请重新选择监控目标`;
+    }
+
+    if (this.monitoringPaused && selected) {
+      headline = '监控已暂停';
+      caption = '不再后台轮询、提醒或自动开机，点击“恢复监控”继续';
+    }
+
     let autoStartSubtitle = '只提醒，不自动开机';
     if (this.autoStartEnabled) {
-      autoStartSubtitle = state === 'stopped' ? '守候空闲卡，出现即开机' : '等待实例关机后接管';
+      autoStartSubtitle = this.monitoringPaused
+        ? '监控已暂停，自动开机不会触发'
+        : this.targetLost
+        ? '监控目标已消失，自动开机已暂停'
+        : state === 'stopped'
+          ? '守候空闲卡，出现即开机'
+          : '等待实例关机后接管';
     }
 
     return {
@@ -767,7 +968,10 @@ class Engine extends EventEmitter {
       isRefreshing: this.isRefreshing,
       isAutoStarting: this.isAutoStarting,
       actionInstanceId: this.actionInstanceId,
+      busyInstanceIds: [...this.busy],
+      targetLost: this.targetLost,
       autoStartEnabled: this.autoStartEnabled,
+      monitoringPaused: this.monitoringPaused,
       autoStartSubtitle,
       pollInterval: this.pollInterval,
       lowBalanceThreshold: this.lowBalanceThreshold,
@@ -791,8 +995,24 @@ class Engine extends EventEmitter {
   }
 }
 
+function stockAvailable(stock) {
+  return Boolean(stock) && stock.machineFound && stock.idleGPUs > 0 && stock.idleGPUs >= Math.max(stock.requiredGPUs, 1);
+}
+
+// A stock reading only means something for the exact instance/host/requirement it was fetched for.
+function stockMatches(stock, instance) {
+  return (
+    Boolean(stock) &&
+    Boolean(instance) &&
+    stock.instanceId === instance.id &&
+    stock.machineID === instance.machineID &&
+    stock.requiredGPUs === instance.gpuCount &&
+    stock.gpuName === instance.gpuName
+  );
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-module.exports = { Engine };
+module.exports = { Engine, stockMatches, stockAvailable };

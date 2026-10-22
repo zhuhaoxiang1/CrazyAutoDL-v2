@@ -138,6 +138,8 @@ function parseInstance(raw) {
     id,
     name,
     rawStatus: jsonString(raw.status) || jsonString(raw.instance_status) || 'unknown',
+    // `gpu` or `non_gpu`; empty when AutoDL does not report it. Only meaningful while running.
+    startMode: (jsonString(raw.start_mode) || '').toLowerCase(),
     regionName: jsonString(raw.region_name) || jsonString(raw.region_alias) || '',
     regionSign: jsonString(raw.region_sign) || jsonString(raw.region) || '',
     gpuName,
@@ -205,7 +207,8 @@ function parseMachineStock(json, targetMachineID) {
   });
 
   if (!target || !normalizedTarget) {
-    return { idleGPUs: 0, totalGPUs: null, machineFound: false };
+    const resultTotal = data && typeof data === 'object' && !Array.isArray(data) ? jsonInt(data.result_total) : null;
+    return { idleGPUs: 0, totalGPUs: null, machineFound: false, pageSize: machines.length, resultTotal };
   }
 
   const idle =
@@ -215,7 +218,13 @@ function parseMachineStock(json, targetMachineID) {
   const possibleTotal = jsonInt(target.gpu_num);
   const total = explicitTotal ?? (possibleTotal == null ? null : Math.max(possibleTotal, idle));
 
-  return { idleGPUs: Math.max(0, idle), totalGPUs: total, machineFound: true };
+  return {
+    idleGPUs: Math.max(0, idle),
+    totalGPUs: total,
+    machineFound: true,
+    pageSize: machines.length,
+    resultTotal: null,
+  };
 }
 
 function chinaParts(date) {
@@ -382,6 +391,9 @@ function instanceView(instance) {
     name: instance.name,
     rawStatus: instance.rawStatus,
     state,
+    startMode: instance.startMode || '',
+    isNoCardMode: state === 'running' && instance.startMode === 'non_gpu',
+    isGPUMode: state === 'running' && instance.startMode === 'gpu',
     stateLabel: info.label,
     stateTint: info.tint,
     stateSymbol: info.symbol,
@@ -436,16 +448,21 @@ class BillingSnapshot {
     return this.records.filter((record) => billType(record.type) === 'charge');
   }
 
-  netSpendOn(day) {
+  // Signed: a day with more refunds than charges is negative. Period totals add the signed days first and only then
+  // clamp, so a refund on one day still offsets the charge it refunds on another.
+  signedNetOn(day) {
     const key = chinaDayKey(day);
-    const net = this.records.reduce((sum, record) => {
+    return this.records.reduce((sum, record) => {
       if (chinaDayKey(record.chargeFrom || record.createdAt) !== key) return sum;
       const type = billType(record.type);
       if (type === 'charge') return sum + record.amount;
       if (type === 'refund') return sum - record.amount;
       return sum;
     }, 0);
-    return Math.max(0, net);
+  }
+
+  netSpendOn(day) {
+    return Math.max(0, this.signedNetOn(day));
   }
 
   netSpendSince(start) {
@@ -464,11 +481,13 @@ class BillingSnapshot {
     const series = [];
     for (let offset = days - 1; offset >= 0; offset -= 1) {
       const date = addDays(end, -offset);
+      const net = this.signedNetOn(date);
       series.push({
         date,
         key: chinaDayKey(date),
         label: formatChartDay(date),
-        amount: this.netSpendOn(date),
+        net,
+        amount: Math.max(0, net),
         isToday: offset === 0,
       });
     }
@@ -476,7 +495,7 @@ class BillingSnapshot {
   }
 
   totalSpend(days) {
-    return this.dailySeries(days).reduce((sum, day) => sum + day.amount, 0);
+    return Math.max(0, this.dailySeries(days).reduce((sum, day) => sum + day.net, 0));
   }
 
   todaySpend() {
@@ -609,6 +628,7 @@ function stockView(stock) {
     gpuName: stock.gpuName,
     requiredGPUs: stock.requiredGPUs,
     machineFound: stock.machineFound,
+    incomplete: Boolean(stock.incomplete),
     checkedAt: stock.checkedAt ? stock.checkedAt.toISOString() : null,
     isAvailable:
       stock.machineFound && stock.idleGPUs > 0 && stock.idleGPUs >= Math.max(stock.requiredGPUs, 1),

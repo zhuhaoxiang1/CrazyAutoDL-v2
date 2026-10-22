@@ -51,6 +51,11 @@ struct AutoDLInstance: Identifiable, Equatable {
     let memoryTotal: Int64?
     let memoryUsed: Int64?
     let releaseAt: Date?
+    /// AutoDL `start_mode`: `gpu` or `non_gpu` (booted without a card). Only meaningful while running.
+    var startMode: String = ""
+    /// Idle / total cards on the machine this instance lives on, as AutoDL reports them in the instance list.
+    var homeIdle: Int? = nil
+    var homeTotal: Int? = nil
 
     var state: InstanceState {
         switch rawStatus.lowercased() {
@@ -250,7 +255,10 @@ struct AutoDLInstance: Identifiable, Equatable {
             diskExpandAvailable: jsonInt64(raw["disk_expand_available"]),
             memoryTotal: memoryTotal,
             memoryUsed: memoryUsed,
-            releaseAt: releaseAt
+            releaseAt: releaseAt,
+            startMode: jsonString(raw["start_mode"]) ?? "",
+            homeIdle: jsonInt(raw["gpu_idle_num"]).map { max(0, $0) },
+            homeTotal: jsonInt(raw["gpu_all_num"]).flatMap { $0 > 0 ? $0 : nil }
         )
     }
 
@@ -265,9 +273,20 @@ struct GPUStock: Equatable {
     let requiredGPUs: Int
     let checkedAt: Date
     let machineFound: Bool
+    /// The instance this reading was taken for. A reading only describes that instance, host and card requirement.
+    var instanceID: String = ""
+    /// The host was not found, but the result set was larger than what was searched, so "no free card" is unproven.
+    var incomplete: Bool = false
 
     var isAvailable: Bool {
         machineFound && idleGPUs > 0 && idleGPUs >= requiredGPUs
+    }
+
+    func matches(_ instance: AutoDLInstance) -> Bool {
+        instanceID == instance.id
+            && machineID == instance.machineID
+            && requiredGPUs == instance.gpuCount
+            && gpuName == instance.gpuName
     }
 
     var occupiedGPUs: Int? {
@@ -285,6 +304,9 @@ struct GPUStockParseResult {
     let idleGPUs: Int
     let totalGPUs: Int?
     let machineFound: Bool
+    /// Machines on the page that was parsed, and the server's total for the whole query when it reports one.
+    var pageCount: Int = 0
+    var resultTotal: Int? = nil
 }
 
 struct AccountBalance: Equatable {
@@ -467,7 +489,10 @@ struct BillRecord: Identifiable, Equatable {
 
 struct DailySpend: Identifiable, Equatable {
     let date: Date
-    let amount: Double
+    /// Signed net of the day: charges minus refunds, negative when refunds exceed charges.
+    let net: Double
+    /// What a bar shows: the net, floored at zero.
+    var amount: Double { max(0, net) }
 
     var id: Date { date }
 }
@@ -481,22 +506,44 @@ struct ConsumptionSlice: Identifiable, Equatable {
 struct BillingSnapshot: Equatable {
     let records: [BillRecord]
     let fetchedAt: Date
+    let recentRecords: [BillRecord]
+    // Net spend keyed by start of day, built once so the billing page can query it on every redraw.
+    private let netByDay: [Date: Double]
+
+    init(records: [BillRecord], fetchedAt: Date) {
+        self.records = records
+        self.fetchedAt = fetchedAt
+        recentRecords = Array(records.sorted { $0.createdAt > $1.createdAt }.prefix(12))
+
+        let calendar = AppTime.calendar
+        var netByDay: [Date: Double] = [:]
+        for record in records {
+            let day = calendar.startOfDay(for: record.effectiveDate)
+            switch record.billType {
+            case .charge: netByDay[day, default: 0] += record.amount
+            case .refund: netByDay[day, default: 0] -= record.amount
+            default: break
+            }
+        }
+        self.netByDay = netByDay
+    }
+
+    static func == (lhs: BillingSnapshot, rhs: BillingSnapshot) -> Bool {
+        lhs.fetchedAt == rhs.fetchedAt && lhs.records == rhs.records
+    }
 
     var chargeRecords: [BillRecord] {
         records.filter { $0.billType == .charge }
     }
 
+    /// Signed: period totals add the days first and only then floor at zero, so a refund on one day still offsets
+    /// the charge it refunds on another.
+    func signedNet(on day: Date) -> Double {
+        netByDay[AppTime.calendar.startOfDay(for: day)] ?? 0
+    }
+
     func netSpend(on day: Date) -> Double {
-        let calendar = AppTime.calendar
-        let net = records.reduce(0.0) { partial, record in
-            guard calendar.isDate(record.effectiveDate, inSameDayAs: day) else { return partial }
-            switch record.billType {
-            case .charge: return partial + record.amount
-            case .refund: return partial - record.amount
-            default: return partial
-            }
-        }
-        return max(0, net)
+        max(0, signedNet(on: day))
     }
 
     func netSpend(since start: Date) -> Double {
@@ -516,12 +563,12 @@ struct BillingSnapshot: Equatable {
         let end = calendar.startOfDay(for: Date())
         return (0..<days).reversed().compactMap { offset in
             guard let day = calendar.date(byAdding: .day, value: -offset, to: end) else { return nil }
-            return DailySpend(date: day, amount: netSpend(on: day))
+            return DailySpend(date: day, net: signedNet(on: day))
         }
     }
 
     func totalSpend(days: Int) -> Double {
-        dailySeries(days: days).reduce(0) { $0 + $1.amount }
+        max(0, dailySeries(days: days).reduce(0) { $0 + $1.net })
     }
 
     var todaySpend: Double {
@@ -561,10 +608,6 @@ struct BillingSnapshot: Equatable {
         return totals
             .map { ConsumptionSlice(id: $0.key, label: $0.key, amount: $0.value) }
             .sorted { $0.amount > $1.amount }
-    }
-
-    var recentRecords: [BillRecord] {
-        Array(records.sorted { $0.createdAt > $1.createdAt }.prefix(12))
     }
 }
 

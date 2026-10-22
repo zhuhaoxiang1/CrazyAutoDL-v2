@@ -25,9 +25,8 @@ struct AuthView: View {
         .padding(.bottom, 28)
         .frame(maxWidth: 1260, maxHeight: 900)
         .opacity(appeared ? 1 : 0)
-        .offset(y: appeared ? 0 : 10)
         .onAppear {
-            withAnimation(.smooth(duration: 0.7)) { appeared = true }
+            withAnimation(.easeOut(duration: 0.2)) { appeared = true }
         }
         .sheet(isPresented: $showManualToken) {
             ManualTokenSheet()
@@ -39,39 +38,33 @@ struct AuthView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 13) {
                 BrandMark(size: 46)
-                HStack(alignment: .firstTextBaseline, spacing: 1) {
-                    Text("胡闹")
-                        .foregroundStyle(AppTheme.textPrimary)
-                    Text("AutoDL")
-                        .foregroundStyle(AppTheme.mint)
+                Text("胡闹AutoDL")
+                    .scaledFont(size: 20, weight: .semibold)
+                    .foregroundStyle(AppTheme.textPrimary)
+
+                Spacer()
+
+                if model.canCancelAuth {
+                    Button {
+                        model.cancelAuth()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "chevron.left")
+                                .scaledFont(size: 9, weight: .bold)
+                            Text("返回")
+                        }
+                    }
+                    .buttonStyle(ActionButtonStyle(tint: .white))
                 }
-                .scaledFont(size: 21, weight: .bold, design: .rounded)
             }
 
             Spacer(minLength: 30)
 
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(AppTheme.mint)
-                    .frame(width: 5, height: 5)
-                    .shadow(color: AppTheme.mint.opacity(0.8), radius: 5)
-                EyebrowLabel(text: "GPU Sentinel · Local First")
-            }
+            Text(model.authTitle)
+                .scaledFont(size: 30, weight: .semibold)
+                .foregroundStyle(AppTheme.textPrimary)
 
-            Text("把显卡，\n守在手里。")
-                .scaledFont(size: 45, weight: .bold, design: .rounded)
-                .tracking(-1.2)
-                .lineSpacing(2)
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.white, .white.opacity(0.78), AppTheme.mint.opacity(0.84)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .padding(.top, 15)
-
-            Text("登录 AutoDL 后，胡闹AutoDL 会替你盯住实例状态与目标主机的空闲显卡。有卡就提醒，或者直接帮你开机抢下。")
+            Text(introMessage)
                 .scaledFont(size: 14, weight: .regular)
                 .foregroundStyle(AppTheme.textSecondary)
                 .lineSpacing(5)
@@ -110,6 +103,13 @@ struct AuthView: View {
         }
     }
 
+    private var introMessage: String {
+        if model.isAddingAccount {
+            return "在右侧用另一个 AutoDL 账号登录。添加后所有账号会同时监控、提醒和自动开机，点左下角的账号即可切换查看。"
+        }
+        return "登录 AutoDL 后，胡闹AutoDL 会替你盯住实例状态与目标主机的空闲显卡。有卡就提醒，或者直接帮你开机抢下。"
+    }
+
     private var loginPanel: some View {
         VStack(spacing: 0) {
             browserHeader
@@ -130,11 +130,7 @@ struct AuthView: View {
                     onTokenCaptured: handleCapturedToken
                 )
                 .id(webViewID)
-                .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 17, style: .continuous)
-                        .strokeBorder(.white.opacity(0.08), lineWidth: 0.7)
-                }
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 if let loadError, !isLoading {
                     networkErrorOverlay(loadError)
@@ -154,20 +150,8 @@ struct AuthView: View {
 
             browserFooter
         }
-        .glassPanel(cornerRadius: 30, tint: AppTheme.aqua)
-        .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 30, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [.white.opacity(0.30), .clear, AppTheme.aqua.opacity(0.16)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.8
-                )
-                .allowsHitTesting(false)
-        }
+        .panel()
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var browserHeader: some View {
@@ -280,7 +264,7 @@ struct AuthView: View {
                 .scaledFont(size: 10, weight: .semibold)
             Text(error)
                 .scaledFont(size: 10.5, weight: .medium)
-                .lineLimit(2)
+                .lineLimit(3)
             Spacer(minLength: 4)
             Button {
                 model.loginError = nil
@@ -316,7 +300,7 @@ struct AuthView: View {
                 .buttonStyle(ActionButtonStyle(tint: AppTheme.mint, prominent: true))
         }
         .padding(26)
-        .glassPanel(cornerRadius: 22, tint: AppTheme.amber)
+        .panel()
     }
 
     private var verifyingOverlay: some View {
@@ -330,7 +314,7 @@ struct AuthView: View {
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 22)
-        .glassPanel(cornerRadius: 20, tint: AppTheme.mint)
+        .panel()
         .transition(.opacity.combined(with: .scale(scale: 0.96)))
     }
 
@@ -385,12 +369,7 @@ private struct ManualTokenSheet: View {
 
     var body: some View {
         ZStack {
-            Color(red: 0.035, green: 0.06, blue: 0.07)
-            Circle()
-                .fill(AppTheme.mint.opacity(0.14))
-                .frame(width: 330, height: 330)
-                .blur(radius: 100)
-                .offset(x: -160, y: -130)
+            AppTheme.pageBackground
 
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
@@ -516,8 +495,7 @@ private struct ManualTokenSheet: View {
         let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, !model.isLoggingIn else { return }
         Task {
-            await model.signIn(token: value)
-            if model.phase == .signedIn {
+            if await model.signIn(token: value) {
                 dismiss()
             }
         }

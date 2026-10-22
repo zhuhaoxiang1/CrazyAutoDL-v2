@@ -3,16 +3,36 @@ import Foundation
 struct AutoDLAPI {
     private let token: String
     private let session: URLSession
+    let isSubAccount: Bool
 
     private static let baseURL = URL(string: "https://www.autodl.com/api/v1")!
 
-    init(token: String) {
+    init(token: String, isSubAccount: Bool = false, session: URLSession? = nil) {
         self.token = token
+        self.isSubAccount = isSubAccount
+        if let session {
+            self.session = session
+            return
+        }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 20
         configuration.timeoutIntervalForResource = 30
         configuration.waitsForConnectivity = false
-        session = URLSession(configuration: configuration)
+        self.session = URLSession(configuration: configuration)
+    }
+
+    static func connect(
+        token: String,
+        preferSubAccount: Bool = false,
+        session: URLSession? = nil
+    ) async throws -> (api: AutoDLAPI, instances: [AutoDLInstance]) {
+        let api = AutoDLAPI(token: token, isSubAccount: preferSubAccount, session: session)
+        do {
+            return (api, try await api.fetchInstances())
+        } catch AutoDLError.api(_, let message) where !preferSubAccount && message.contains("无当前资源访问权限") {
+            let subAccountAPI = AutoDLAPI(token: token, isSubAccount: true, session: session)
+            return (subAccountAPI, try await subAccountAPI.fetchInstances())
+        }
     }
 
     func fetchInstances() async throws -> [AutoDLInstance] {
@@ -37,51 +57,163 @@ struct AutoDLAPI {
     }
 
     func fetchGPUStock(for instance: AutoDLInstance) async throws -> GPUStock {
-        guard !instance.machineID.isEmpty else {
-            return GPUStock(
-                idleGPUs: 0,
-                totalGPUs: nil,
-                machineID: "",
+        func stock(_ result: GPUStockParseResult?, incomplete: Bool = false) -> GPUStock {
+            GPUStock(
+                idleGPUs: result?.idleGPUs ?? 0,
+                totalGPUs: result?.totalGPUs,
+                machineID: instance.machineID,
                 gpuName: instance.gpuName,
                 requiredGPUs: instance.gpuCount,
                 checkedAt: Date(),
-                machineFound: false
+                machineFound: result?.machineFound ?? false,
+                instanceID: instance.id,
+                incomplete: incomplete
             )
         }
+        guard !instance.machineID.isEmpty else { return stock(nil) }
 
-        var body: [String: Any] = [
-            "default_order": true,
-            "gpu_idle_num": max(instance.gpuCount, 1),
-            "page_index": 1,
-            "page_size": 100
-        ]
-        if !instance.gpuName.isEmpty {
-            body["gpu_type_name"] = [instance.gpuName]
-        }
-        if !instance.regionSign.isEmpty {
-            body["region_sign_list"] = [instance.regionSign]
-        }
-        if !instance.chargeType.isEmpty {
-            body["charge_type"] = instance.chargeType
-        }
+        // The target host can sit past the first page of a large region/model result, so keep paging until it is
+        // found, the result set is exhausted, or the page cap is hit. A capped miss is reported as incomplete
+        // rather than as "no free card".
+        let pageSize = Self.stockPageSize
+        var seen = 0
+        for page in 1...Self.stockMaxPages {
+            var body: [String: Any] = [
+                "default_order": true,
+                "gpu_idle_num": max(instance.gpuCount, 1),
+                "page_index": page,
+                "page_size": pageSize
+            ]
+            if !instance.gpuName.isEmpty {
+                body["gpu_type_name"] = [instance.gpuName]
+            }
+            if !instance.regionSign.isEmpty {
+                body["region_sign_list"] = [instance.regionSign]
+            }
+            if !instance.chargeType.isEmpty {
+                body["charge_type"] = instance.chargeType
+            }
 
-        let json = try await post(path: "/user/machine/list", body: body)
-        let result = Self.parseMachineStock(json: json, targetMachineID: instance.machineID)
-        return GPUStock(
-            idleGPUs: result.idleGPUs,
-            totalGPUs: result.totalGPUs,
-            machineID: instance.machineID,
-            gpuName: instance.gpuName,
-            requiredGPUs: instance.gpuCount,
-            checkedAt: Date(),
-            machineFound: result.machineFound
-        )
+            let json = try await post(path: "/user/machine/list", body: body)
+            let result = Self.parseMachineStock(json: json, targetMachineID: instance.machineID)
+            if result.machineFound { return stock(result) }
+
+            seen += result.pageCount
+            if let total = result.resultTotal {
+                if seen >= total || result.pageCount == 0 { return stock(result) }
+            } else if result.pageCount < pageSize {
+                return stock(result)
+            }
+        }
+        return stock(nil, incomplete: true)
     }
 
-    func powerOn(instanceUUID: String) async throws {
+    static let stockPageSize = 100
+    static let stockMaxPages = 10
+
+    /// Every machine of one GPU model that has at least one idle card, across all regions.
+    /// AutoDL rejects this query without a model filter (`DatabaseError`), so a model name is required.
+    /// Only machines a new instance could land on are returned (see `MarketMachine.isRentable`).
+    func fetchMarketMachines(gpuName: String, chargeType: String, regionSigns: [String] = []) async throws -> [MarketMachine] {
+        var machines: [MarketMachine] = []
+        var fetched = 0
+        var page = 1
+        while page <= 4 {
+            var body: [String: Any] = [
+                "default_order": true,
+                "gpu_idle_num": 1,
+                "page_index": page,
+                "page_size": 500,
+                "gpu_type_name": [gpuName]
+            ]
+            if !regionSigns.isEmpty {
+                body["region_sign_list"] = regionSigns
+            }
+            if !chargeType.isEmpty {
+                body["charge_type"] = chargeType
+            }
+            let json = try await post(path: "/user/machine/list", body: body)
+            guard let data = json["data"] as? [String: Any],
+                  let list = data["list"] as? [[String: Any]]
+            else { throw AutoDLError.invalidResponse }
+
+            fetched += list.count
+            machines += list.compactMap(MarketMachine.parse).filter(\.isRentable)
+
+            let total = jsonInt(data["result_total"]) ?? fetched
+            if list.isEmpty || fetched >= total { break }
+            page += 1
+        }
+        return machines
+    }
+
+    /// Every region pool AutoDL runs. Public: needs no login.
+    static func fetchRegionCatalog() async throws -> [CatalogRegion] {
+        guard let url = URL(string: baseURL.absoluteString + "/common") else { throw AutoDLError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("HuNaoAutoDL/1.0 (macOS)", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 20
+        let data: Data
+        do {
+            (data, _) = try await URLSession(configuration: .ephemeral).data(for: request)
+        } catch {
+            throw AutoDLError.network(error.localizedDescription)
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = json["data"] as? [String: Any],
+              let list = payload["region_list"] as? [[String: Any]]
+        else { throw AutoDLError.invalidResponse }
+        return list.compactMap(CatalogRegion.parse)
+    }
+
+    /// Idle and total cards per GPU model across the given region pools, including models with nothing idle.
+    /// Several pools in one request come back merged by model name. Requires login.
+    func fetchGPUTypes(regionSigns: [String]) async throws -> [GPUTypeStat] {
+        let json = try await post(path: "/machine/region/gpu_type", body: ["region_sign_list": regionSigns])
+        guard json["data"] is [[String: Any]] else { throw AutoDLError.invalidResponse }
+        return GPUTypeStat.parseList(json["data"])
+    }
+
+    /// Every machine in one region that has at least one idle card, all GPU models. Unlike the per-model query
+    /// this needs no model name, so the region view can list whatever the region has.
+    /// `regionSigns` is every pool of one data center. Returns the machines and how many pages that took.
+    /// A page of 100 would need 15 requests for a big data center and silently miss machines past a page cap.
+    func fetchRegionMachines(regionSigns: [String], chargeType: String) async throws -> (machines: [MarketMachine], pages: Int) {
+        var machines: [MarketMachine] = []
+        var page = 1
+        // The server honours big pages (a 4-pool data center is ~1500 machines), so this is normally one request.
+        while page <= 5 {
+            var body: [String: Any] = [
+                "default_order": true,
+                "gpu_idle_num": 1,
+                "page_index": page,
+                "page_size": 2000,
+                "region_sign_list": regionSigns
+            ]
+            if !chargeType.isEmpty {
+                body["charge_type"] = chargeType
+            }
+            let json = try await post(path: "/user/machine/list", body: body)
+            guard let data = json["data"] as? [String: Any],
+                  let list = data["list"] as? [[String: Any]]
+            else { throw AutoDLError.invalidResponse }
+
+            machines += list.compactMap(MarketMachine.parse)
+
+            let total = jsonInt(data["result_total"]) ?? machines.count
+            if list.isEmpty || machines.count >= total { break }
+            page += 1
+        }
+        return (machines, min(page, 5))
+    }
+
+    /// `noCard` boots without a GPU. The `non_gpu` payload is inferred from the `start_mode` value the instance
+    /// list reports and is not documented, so the caller must verify the resulting `start_mode`.
+    func powerOn(instanceUUID: String, noCard: Bool = false) async throws {
         let body: [String: Any] = [
             "instance_uuid": instanceUUID,
-            "payload": "gpu"
+            "payload": noCard ? "non_gpu" : "gpu"
         ]
         _ = try await post(path: "/instance/power_on", body: body)
     }
@@ -163,7 +295,8 @@ struct AutoDLAPI {
         path: String,
         body: [String: Any]?
     ) async throws -> [String: Any] {
-        guard let url = URL(string: Self.baseURL.absoluteString + path) else {
+        let accountPath = isSubAccount ? "/sub_user" + path : path
+        guard let url = URL(string: Self.baseURL.absoluteString + accountPath) else {
             throw AutoDLError.invalidResponse
         }
         var request = URLRequest(url: url)
@@ -213,7 +346,9 @@ struct AutoDLAPI {
         targetMachineID: String
     ) -> GPUStockParseResult {
         var machines: [[String: Any]] = []
+        var resultTotal: Int?
         if let data = json["data"] as? [String: Any] {
+            resultTotal = jsonInt(data["result_total"])
             if let list = data["list"] as? [[String: Any]] {
                 machines = list
             } else if let list = data["machines"] as? [[String: Any]] {
@@ -235,7 +370,13 @@ struct AutoDLAPI {
         }
 
         guard let target else {
-            return GPUStockParseResult(idleGPUs: 0, totalGPUs: nil, machineFound: false)
+            return GPUStockParseResult(
+                idleGPUs: 0,
+                totalGPUs: nil,
+                machineFound: false,
+                pageCount: machines.count,
+                resultTotal: resultTotal
+            )
         }
 
         let idle = jsonInt(target["gpu_idle_num"])
@@ -251,7 +392,8 @@ struct AutoDLAPI {
         return GPUStockParseResult(
             idleGPUs: max(0, idle),
             totalGPUs: total,
-            machineFound: true
+            machineFound: true,
+            pageCount: machines.count
         )
     }
 }
