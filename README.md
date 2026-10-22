@@ -332,7 +332,7 @@ Windows 版没有购买代码签名证书，SmartScreen 会显示「Windows 已�
 
 ## 作者
 
-原项目由 [A2ureeE](https://github.com/A2ureeE/CrazyAutoDL) 开发，本仓库为其 V2 二次开发版本。
+由 [zhuhaoxiang1](https://github.com/zhuhaoxiang1) 开发并维护。
 
 如果它帮你抢到过一张显卡，欢迎去仓库点个 Star：
 
