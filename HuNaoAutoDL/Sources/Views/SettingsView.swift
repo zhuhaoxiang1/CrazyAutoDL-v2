@@ -15,7 +15,7 @@ struct SettingsView: View {
     @State private var editingAccountID: String?
     @State private var draftName = ""
 
-    private let intervalChoices: [TimeInterval] = [10, 15, 30, 60]
+    private let intervalChoices: [TimeInterval] = [1, 3, 10, 15, 30, 60]
     private let balanceThresholdChoices: [Double] = [10, 20, 50, 100]
     private let fontScaleChoices: [Double] = [0.85, 0.9, 1.0, 1.1, 1.2, 1.3]
 
@@ -472,7 +472,7 @@ struct SettingsView: View {
                     )
                 }
 
-                Text("抢占依赖轮询，建议 10–15 秒。过于频繁可能触发 AutoDL 接口限流。")
+                Text("抢占依赖轮询，建议 10–15 秒。1–3 秒仅建议短时间抢卡使用，过于频繁可能触发 AutoDL 接口限流。")
                     .scaledFont(size: 9.5)
                     .foregroundStyle(AppTheme.textTertiary)
                     .lineSpacing(2)

@@ -10,5 +10,6 @@ swiftc -parse-as-library \
   -framework SwiftUI -framework AppKit -framework WebKit -framework UserNotifications -framework Combine \
   "${SOURCES[@]}" \
   "$ROOT/Tests/MonitorTests.swift" \
+  "$ROOT/Tests/CloneTests.swift" \
   -o "$TEST_DIR/MonitorTests"
 "$TEST_DIR/MonitorTests"

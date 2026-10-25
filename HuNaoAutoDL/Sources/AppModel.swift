@@ -127,6 +127,7 @@ final class AppModel: ObservableObject {
 
     /// Starts the background scan for region alert rules. Idempotent; called once the window exists.
     func startRegionWatch() {
+        installCloneHandler()
         market.startWatching(
             account: { [weak self] in
                 guard let monitor = self?.current, monitor.authFailure == nil, !monitor.account.token.isEmpty else {
@@ -137,6 +138,11 @@ final class AppModel: ObservableObject {
             chargeType: { [weak self] in
                 guard let type = self?.selectedInstance?.chargeType, !type.isEmpty else { return "payg" }
                 return type
+            },
+            accountForSource: { [weak self] sourceID in
+                self?.monitors.first {
+                    $0.authFailure == nil && $0.instances.contains { $0.id == sourceID }
+                }?.account
             },
             onAlert: { [weak self] title, body, id in
                 Task { @MainActor in
@@ -151,6 +157,34 @@ final class AppModel: ObservableObject {
                 }
             }
         )
+    }
+
+    /// Reads the clone source's image info ahead of time so a later order needs no extra round trip.
+    func prepareClone(sourceID: String) {
+        guard let monitor = monitors.first(where: { $0.instances.contains { $0.id == sourceID } }) else { return }
+        monitor.refreshNow()
+        monitor.prefetchCloneImage(sourceID: sourceID)
+    }
+
+    func enableAutoClone(ruleID: String, sourceID: String) {
+        guard let monitor = monitors.first(where: { $0.instances.contains { $0.id == sourceID } }) else { return }
+        guard monitor.pendingCloneOrders[sourceID] == nil else {
+            presentToast(kind: .warning, title: "请先核对克隆订单", message: "该源实例已有订单待确认，请在区域页核对后再开启")
+            return
+        }
+        market.setAutoClone(id: ruleID, enabled: true, sourceID: sourceID)
+        prepareClone(sourceID: sourceID)
+    }
+
+    /// Routes a matched auto-clone rule to the account that owns its source instance.
+    private func installCloneHandler() {
+        market.setCloneHandler { [weak self] rule, hits in
+            guard let monitor = self?.monitors.first(where: { $0.instances.contains { $0.id == rule.cloneSourceID } }) else {
+                self?.current?.addActivity(kind: .warning, title: "自动克隆已跳过", detail: "找不到克隆源实例，请在区域页重新开启")
+                return false
+            }
+            return monitor.autoClone(rule: rule, hits: hits)
+        }
     }
 
     /// Asks for notification permission the first time a rule is created, so the alert can actually be shown.
@@ -173,7 +207,7 @@ final class AppModel: ObservableObject {
 
         let defaults = UserDefaults.standard
         let storedInterval = defaults.double(forKey: DefaultsKey.pollInterval)
-        pollInterval = (8...120).contains(storedInterval) ? storedInterval : 15
+        pollInterval = (1...120).contains(storedInterval) ? storedInterval : 15
 
         let storedThreshold = defaults.double(forKey: DefaultsKey.lowBalanceThreshold)
         lowBalanceThreshold = (1...10_000).contains(storedThreshold) ? storedThreshold : 20
@@ -462,7 +496,7 @@ final class AppModel: ObservableObject {
     }
 
     func setPollInterval(_ seconds: TimeInterval) {
-        let normalized = min(max(seconds, 8), 120)
+        let normalized = min(max(seconds, 1), 120)
         guard pollInterval != normalized else { return }
         pollInterval = normalized
         defaults.set(normalized, forKey: DefaultsKey.pollInterval)

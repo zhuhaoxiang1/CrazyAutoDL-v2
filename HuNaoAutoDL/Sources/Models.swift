@@ -56,6 +56,13 @@ struct AutoDLInstance: Identifiable, Equatable {
     /// Idle / total cards on the machine this instance lives on, as AutoDL reports them in the instance list.
     var homeIdle: Int? = nil
     var homeTotal: Int? = nil
+    /// What AutoDL needs to recreate this instance's image on a clone (see `AutoDLAPI.cloneInstance`).
+    var privateImageUUID = ""
+    var reproductionUUID = ""
+    var cgApplicationUUID = ""
+    var reproductionID: Int? = nil
+    /// nil means unconfirmed; only an explicit zero means the base data disk alone.
+    var expandDataDiskBytes: Int64? = nil
 
     var state: InstanceState {
         switch rawStatus.lowercased() {
@@ -258,7 +265,12 @@ struct AutoDLInstance: Identifiable, Equatable {
             releaseAt: releaseAt,
             startMode: jsonString(raw["start_mode"]) ?? "",
             homeIdle: jsonInt(raw["gpu_idle_num"]).map { max(0, $0) },
-            homeTotal: jsonInt(raw["gpu_all_num"]).flatMap { $0 > 0 ? $0 : nil }
+            homeTotal: jsonInt(raw["gpu_all_num"]).flatMap { $0 > 0 ? $0 : nil },
+            privateImageUUID: jsonString(raw["private_image_uuid"]) ?? "",
+            reproductionUUID: jsonString(raw["reproduction_uuid"]) ?? "",
+            cgApplicationUUID: jsonString(raw["cg_application_uuid"]) ?? "",
+            reproductionID: jsonInt(raw["reproduction_id"]),
+            expandDataDiskBytes: expandDataDisk.flatMap { $0 >= 0 ? $0 : nil }
         )
     }
 
@@ -663,6 +675,7 @@ enum AutoDLError: LocalizedError {
     case api(code: String, message: String)
     case invalidResponse
     case network(String)
+    case clonePrecondition(String)
 
     var errorDescription: String? {
         switch self {
@@ -676,7 +689,27 @@ enum AutoDLError: LocalizedError {
             return "无法解析 AutoDL 返回的数据"
         case .network(let message):
             return "网络请求失败：\(message)"
+        case .clonePrecondition(let message):
+            return message
         }
+    }
+
+    /// Failures a retry cannot fix (not enough balance, real-name check...): AutoDL marks them with a `TO...` code.
+    var isPermanentOrderFailure: Bool {
+        if case .api(let code, _) = self { return code.hasPrefix("TO") }
+        return false
+    }
+
+    /// The console explicitly identifies this code as insufficient idle GPUs, before an order can be created.
+    var isRetryableCloneRejection: Bool {
+        if case .api(let code, _) = self { return code == "MachineGpuNumUpdateFailed" }
+        return false
+    }
+
+    var isDefinitiveCloneRejection: Bool {
+        if isRetryableCloneRejection { return true }
+        if case .api(let code, _) = self { return code == "TORecharge" || code == "TORealName" }
+        return false
     }
 
     var isAuthFailure: Bool {

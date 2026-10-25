@@ -10,6 +10,9 @@ struct RegionPanel: View {
 
     @State private var expandedModels: Set<String> = []
     @State private var customModel = ""
+    @State private var cloneConfirmRule: RegionAlertRule?
+    @State private var cloneConfirmSource: AutoDLInstance?
+    @State private var reviewedCloneOrder: PendingCloneOrder?
 
     private var mine: [AutoDLInstance] {
         model.instances.filter { market.canonicalSign(for: $0.regionSign) == regionSign }
@@ -30,8 +33,60 @@ struct RegionPanel: View {
     var body: some View {
         VStack(spacing: 14) {
             instancesSection
+            cloneOrdersSection
             rulesSection
             modelsSection
+        }
+        .alert(
+            "开启自动克隆？",
+            isPresented: Binding(get: { cloneConfirmRule != nil }, set: { if !$0 { cloneConfirmRule = nil } }),
+            presenting: cloneConfirmRule
+        ) { rule in
+            Button("开启（仅一次）") {
+                if let source = cloneConfirmSource {
+                    model.enableAutoClone(ruleID: rule.id, sourceID: source.id)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { rule in
+            Text("\(rule.gpuName) 在 \(rule.regionName) 有 ≥\(rule.minCards) 卡的空闲机器时（包括现在已有的），会自动把「\(cloneConfirmSource?.name ?? "—")」按量计费克隆过去（系统盘 + 数据盘 + 稀疏文件优化），新实例开始计费。源实例正在使用 GPU 时不会克隆。后台优先扫描本区，每轮结束后约等 1 秒；失败时退避。服务端明确返回库存不足后可换机，总共最多尝试 3 次；超时或结果未知时停止重试，等待核对订单。")
+        }
+        .alert(
+            "确认已核对克隆订单？",
+            isPresented: Binding(get: { reviewedCloneOrder != nil }, set: { if !$0 { reviewedCloneOrder = nil } }),
+            presenting: reviewedCloneOrder
+        ) { order in
+            Button("已核对，解除保护") {
+                model.current?.acknowledgeCloneOrder(sourceID: order.sourceID, orderID: order.id)
+            }
+            Button("取消", role: .cancel) {}
+        } message: { _ in
+            Text("请先在 AutoDL 控制台确认之前请求是否创建了实例、是否正在计费。解除保护后可重新开启自动克隆；不会关闭或删除任何已有实例。")
+        }
+    }
+
+    @ViewBuilder
+    private var cloneOrdersSection: some View {
+        if let monitor = model.current {
+            if let sourceID = monitor.preparingCloneSourceID, mine.contains(where: { $0.id == sourceID }) {
+                HStack {
+                    Text("正在准备克隆，尚未发送订单")
+                    Spacer()
+                    Button("取消克隆") { monitor.cancelPreparingClone(sourceID: sourceID) }
+                }
+                .scaledFont(size: 12)
+            }
+            ForEach(monitor.pendingCloneOrders.values.filter { market.canonicalSign(for: $0.regionSign) == regionSign }.sorted { $0.id < $1.id }) { order in
+                HStack {
+                    Text("克隆订单待核对 · \(order.sourceName)")
+                        .foregroundStyle(AppTheme.amber)
+                    Spacer()
+                    Link("打开控制台", destination: URL(string: "https://www.autodl.com/console/instance/list")!)
+                    Button("已核对…") { reviewedCloneOrder = order }
+                        .disabled(monitor.cloneInFlight)
+                }
+                .scaledFont(size: 12)
+            }
         }
     }
 
@@ -92,7 +147,7 @@ struct RegionPanel: View {
             return Verdict(label: "运行中 · 占用 GPU", tint: AppTheme.mint)
         case .running:
             // No-card mode holds no GPU, so judge whether a GPU start would work, like a stopped instance.
-            guard let snapshot else { return Verdict(label: "无卡运行 · 未占用 GPU", tint: AppTheme.aqua) }
+            guard snapshot != nil else { return Verdict(label: "无卡运行 · 未占用 GPU", tint: AppTheme.aqua) }
             let idle = ownMachineIdle(for: instance)
             if idle >= instance.gpuCount {
                 return Verdict(label: "无卡运行 · 本机有 \(idle) 张空卡，关机后可用 GPU 开机", tint: AppTheme.aqua)
@@ -243,6 +298,29 @@ struct RegionPanel: View {
             }
             .buttonStyle(.plain)
             .help("单机至少 \(rule.minCards) 张空闲才提醒，点击切换 1 / 2 / 4 / 8")
+            Button {
+                if rule.autoClone {
+                    market.setAutoClone(id: rule.id, enabled: false, sourceID: nil)
+                } else if focus != nil {
+                    cloneConfirmSource = focus
+                    cloneConfirmRule = rule
+                }
+            } label: {
+                Text(rule.autoClone ? "克隆 开" : "克隆")
+                    .scaledFont(size: 11, weight: .semibold)
+                    .foregroundStyle(rule.autoClone ? AppTheme.amber : AppTheme.textTertiary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .strokeBorder((rule.autoClone ? AppTheme.amber : AppTheme.textTertiary).opacity(0.5), lineWidth: 1)
+                    }
+            }
+            .buttonStyle(.plain)
+            .disabled(focus == nil && !rule.autoClone)
+            .help(rule.autoClone
+                  ? "已开启：出现空卡时自动克隆「\(mine.first { $0.id == rule.cloneSourceID }?.name ?? "源实例")」，只触发一次。点击关闭"
+                  : "出现空卡时自动克隆本区实例到这台机器（按量计费，系统盘+数据盘+稀疏优化）")
             Text(scanFailure != nil
                  ? (hits.isEmpty ? "扫描失败" : "数据过期 · 上次 \(hits.count) 台")
                  : (live ? "现有 \(hits.count) 台" : "暂无"))

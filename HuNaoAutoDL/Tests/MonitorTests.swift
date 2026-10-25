@@ -5,19 +5,20 @@ final class StubProtocol: URLProtocol {
     enum Reply {
         case respond(Int, [String: Any])
         case hold(String)
+        case fail(URLError)
     }
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var _handler: ((String, [String: Any]) -> Reply)?
     nonisolated(unsafe) private static var _held: [String: [StubProtocol]] = [:]
-    nonisolated(unsafe) private static var _log: [(path: String, body: [String: Any])] = []
+    nonisolated(unsafe) private static var _log: [(path: String, body: [String: Any], authorization: String?)] = []
 
     static func setHandler(_ handler: @escaping (String, [String: Any]) -> Reply) {
         lock.lock(); defer { lock.unlock() }
         _handler = handler
     }
 
-    static var log: [(path: String, body: [String: Any])] {
+    static var log: [(path: String, body: [String: Any], authorization: String?)] {
         lock.lock(); defer { lock.unlock() }
         return _log
     }
@@ -71,7 +72,7 @@ final class StubProtocol: URLProtocol {
         let path = request.url!.path
         let body = Self.bodyDictionary(of: request)
         Self.lock.lock()
-        Self._log.append((path, body))
+        Self._log.append((path, body, request.value(forHTTPHeaderField: "Authorization")))
         let handler = Self._handler
         Self.lock.unlock()
         guard let reply = handler?(path, body) else {
@@ -83,12 +84,16 @@ final class StubProtocol: URLProtocol {
             Self.lock.lock()
             Self._held[key, default: []].append(self)
             Self.lock.unlock()
-        case .respond:
+        case .respond, .fail:
             finish(reply)
         }
     }
 
     func finish(_ reply: Reply) {
+        if case .fail(let error) = reply {
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
         guard case .respond(let status, let json) = reply else { return }
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -172,6 +177,7 @@ struct MonitorTests {
         try await noCardVerification()
         try await stockPagination()
         try await pausedMonitoring()
+        await cloneRegressions()
         refundNetting()
         print("MonitorTests: \(checks) checks passed; no external network requests")
     }

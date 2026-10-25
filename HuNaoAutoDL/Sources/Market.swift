@@ -22,6 +22,8 @@ struct MarketMachine: Identifiable, Equatable {
     var bindingInstances: Int = 0
     /// 0 means the limit is unknown, which counts as no limit.
     var maxInstances: Int = 0
+    /// How much data disk (bytes) can be added on top of the base one; nil when the list did not say.
+    var maxDataDiskExpand: Int64? = nil
 
     /// Whether a NEW instance can be created here now: online and an instance slot is free.
     var isRentable: Bool {
@@ -46,7 +48,8 @@ struct MarketMachine: Identifiable, Equatable {
             hourlyPrice: price,
             onLine: jsonInt(raw["on_line"]) ?? 2,
             bindingInstances: jsonInt(raw["binding_instance_num"]) ?? 0,
-            maxInstances: jsonInt(raw["max_instance_num"]) ?? 0
+            maxInstances: jsonInt(raw["max_instance_num"]) ?? 0,
+            maxDataDiskExpand: jsonInt64(raw["max_data_disk_expand_size"])
         )
     }
 }
@@ -138,8 +141,27 @@ struct RegionAlertRule: Codable, Identifiable, Equatable {
     let regionName: String
     let gpuName: String
     var minCards: Int
+    /// When set, the first sighting of a matching machine clones `cloneSourceID` onto it (pay-as-you-go, system disk
+    /// + data disk, sparse-file optimisation). One-shot: switched off again as soon as a clone is attempted.
+    var autoClone = false
+    var cloneSourceID: String?
+    var cloneAuthorizationID = UUID().uuidString
 
     var id: String { "\(regionSign)|\(gpuName)" }
+}
+
+extension RegionAlertRule {
+    /// Rules saved before auto-clone existed have no such keys.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        regionSign = try c.decode(String.self, forKey: .regionSign)
+        regionName = try c.decode(String.self, forKey: .regionName)
+        gpuName = try c.decode(String.self, forKey: .gpuName)
+        minCards = try c.decode(Int.self, forKey: .minCards)
+        autoClone = try c.decodeIfPresent(Bool.self, forKey: .autoClone) ?? false
+        cloneSourceID = try c.decodeIfPresent(String.self, forKey: .cloneSourceID)
+        cloneAuthorizationID = try c.decodeIfPresent(String.self, forKey: .cloneAuthorizationID) ?? UUID().uuidString
+    }
 }
 
 /// One GPU model inside a single region.
@@ -235,9 +257,23 @@ final class MarketStore: ObservableObject {
     /// While the background watcher runs it is the only thing that fires alerts, so two sources never disagree.
     private var watcherRunning = false
     /// Set by the app-wide "pause monitoring" switch: the background region scan idles and raises no alerts.
-    var watchPaused = false
+    var watchPaused = false {
+        didSet { if watchPaused != oldValue { watchVersion += 1 } }
+    }
+    private var watchVersion = 0
     private var watchTask: Task<Void, Never>?
+    private var regionWatchTasks: [String: Task<Void, Never>] = [:]
     private var onAlert: ((_ title: String, _ body: String, _ id: String) -> Void)?
+    /// Runs the clone for a rule that just matched; returns whether one was really started.
+    private var onClone: ((_ rule: RegionAlertRule, _ hits: [MarketMachine]) -> Bool)?
+    /// Rules each source's last started clone disarmed, so a failed clone can put them back.
+    private var spentCloneRules: [String: [RegionAlertRule]] = [:]
+    /// Re-tries a source still has: a clone that loses the race for a card is retried a few times, never forever.
+    private var cloneRetriesLeft: [String: Int] = [:]
+    static let maxCloneAttempts = 3
+    /// Region scan pace while a rule in it has auto-clone armed: a card is often gone within seconds.
+    static let fastScanNanos: UInt64 = 1_000_000_000
+    static let idleScanSeconds: TimeInterval = 25
 
     /// Names AutoDL uses in the `gpu_type_name` filter. The first five were seen in a live region query;
     /// the rest are common models whose exact spelling is unconfirmed (a wrong name just returns an empty row).
@@ -249,13 +285,19 @@ final class MarketStore: ObservableObject {
 
     private static let defaultsKey = "hunao.market.watchlist"
     private static let rulesKey = "hunao.market.alertRules"
+    private static let attemptsKey = "hunao.market.cloneAttemptsRemaining"
     private let isDemo = ProcessInfo.processInfo.arguments.contains("--demo")
 
     private let defaults: UserDefaults
+    private let apiSession: URLSession?
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, session: URLSession? = nil) {
         self.defaults = defaults
+        self.apiSession = session
         watchlist = defaults.stringArray(forKey: Self.defaultsKey) ?? []
+        cloneRetriesLeft = (defaults.dictionary(forKey: Self.attemptsKey) ?? [:]).compactMapValues {
+            jsonInt($0).map { min(max($0, 0), Self.maxCloneAttempts) }
+        }
         if let data = defaults.data(forKey: Self.rulesKey),
            let rules = try? JSONDecoder().decode([RegionAlertRule].self, from: data) {
             alertRules = rules
@@ -328,10 +370,25 @@ final class MarketStore: ObservableObject {
                 regionSign: sign,
                 regionName: groupName(for: sign) ?? rule.regionName,
                 gpuName: rule.gpuName,
-                minCards: rule.minCards
+                minCards: rule.minCards,
+                autoClone: rule.autoClone,
+                cloneSourceID: rule.cloneSourceID,
+                cloneAuthorizationID: rule.cloneAuthorizationID
             )
             if migrated != rule { changed = true }
-            if seen.insert(migrated.id).inserted { result.append(migrated) } else { changed = true }
+            if seen.insert(migrated.id).inserted {
+                result.append(migrated)
+            } else if let index = result.firstIndex(where: { $0.id == migrated.id }) {
+                changed = true
+                let previous = result[index]
+                if !previous.autoClone && migrated.autoClone { result[index] = migrated }
+                if previous.autoClone && migrated.autoClone && previous.cloneSourceID != migrated.cloneSourceID {
+                    result[index].autoClone = false
+                    result[index].cloneSourceID = nil
+                    result[index].cloneAuthorizationID = UUID().uuidString
+                }
+                result[index].minCards = max(previous.minCards, migrated.minCards)
+            }
         }
         if changed {
             alertRules = result
@@ -490,9 +547,63 @@ final class MarketStore: ObservableObject {
         persistRules()
     }
 
+    /// Arms or disarms the one-shot auto-clone of `sourceID` for a rule.
+    func setAutoClone(id: String, enabled: Bool, sourceID: String?) {
+        guard let index = alertRules.firstIndex(where: { $0.id == id }) else { return }
+        alertRules[index].autoClone = enabled && sourceID != nil
+        alertRules[index].cloneSourceID = enabled ? sourceID : nil
+        alertRules[index].cloneAuthorizationID = UUID().uuidString
+        if enabled, let sourceID {
+            // Cards already free when the user arms it are cloned onto at the next scan, not only new ones.
+            armed[id] = true
+            cloneRetriesLeft[sourceID] = Self.maxCloneAttempts
+        }
+        persistRules()
+    }
+
+    func isCloneAuthorized(_ rule: RegionAlertRule) -> Bool {
+        !watchPaused && alertRules.contains {
+            $0.id == rule.id && $0.cloneSourceID == rule.cloneSourceID
+                && $0.cloneAuthorizationID == rule.cloneAuthorizationID
+        }
+    }
+
+    func hasAutoClone(sourceID: String) -> Bool {
+        alertRules.contains { $0.autoClone && $0.cloneSourceID == sourceID }
+    }
+
+    func disableAutoClones(sourceID: String) {
+        for rule in alertRules where rule.cloneSourceID == sourceID {
+            setAutoClone(id: rule.id, enabled: false, sourceID: nil)
+        }
+        spentCloneRules[sourceID] = nil
+    }
+
+    /// Only the exact consent consumed by this attempt may be restored. A newer user choice always wins.
+    @discardableResult
+    func restoreAutoClone(for rule: RegionAlertRule) -> Int? {
+        guard isCloneAuthorized(rule), let sourceID = rule.cloneSourceID,
+              let left = cloneRetriesLeft[sourceID], left > 0,
+              let spent = spentCloneRules[sourceID],
+              spent.contains(where: { $0.cloneAuthorizationID == rule.cloneAuthorizationID }) else {
+            return nil
+        }
+        for original in spent {
+            guard let index = alertRules.firstIndex(where: {
+                $0.id == original.id && $0.cloneAuthorizationID == original.cloneAuthorizationID
+                    && $0.cloneSourceID == sourceID
+            }) else { continue }
+            alertRules[index].autoClone = true
+        }
+        spentCloneRules[sourceID] = nil
+        persistRules()
+        return left
+    }
+
     func setMinCards(id: String, _ cards: Int) {
         guard let index = alertRules.firstIndex(where: { $0.id == id }) else { return }
         alertRules[index].minCards = cards
+        alertRules[index].cloneAuthorizationID = UUID().uuidString
         armed[id] = true
         ruleHits[id] = nil
         ruleScanStatus[id] = nil
@@ -510,6 +621,7 @@ final class MarketStore: ObservableObject {
     private func persistRules() {
         guard !isDemo, let data = try? JSONEncoder().encode(alertRules) else { return }
         defaults.set(data, forKey: Self.rulesKey)
+        defaults.set(cloneRetriesLeft, forKey: Self.attemptsKey)
     }
 
     /// Stores a fresh region scan and runs the alert rules against it.
@@ -524,6 +636,11 @@ final class MarketStore: ObservableObject {
     /// Where fired alerts go. `startWatching` installs the real one; tests install a recorder.
     func setAlertHandler(_ handler: @escaping (_ title: String, _ body: String, _ id: String) -> Void) {
         onAlert = handler
+    }
+
+    /// Where a matching rule's clone goes. Tests install a recorder; the app routes it to the account monitor.
+    func setCloneHandler(_ handler: @escaping (_ rule: RegionAlertRule, _ hits: [MarketMachine]) -> Bool) {
+        onClone = handler
     }
 
     /// Fires each rule of the region whose model just went from "no cards" to "has cards".
@@ -543,62 +660,105 @@ final class MarketStore: ObservableObject {
 
     /// Records what satisfies the rule and alerts when that goes from nothing to something.
     private func apply(_ rule: RegionAlertRule, hits: [MarketMachine], at date: Date = Date()) {
+        guard !watchPaused else { return }
         ruleHits[rule.id] = hits
         ruleScanStatus[rule.id] = RuleScanStatus(lastSuccess: date, lastError: nil)
         if hits.isEmpty {
             armed[rule.id] = true
             return
         }
-        guard armed[rule.id] ?? true else { return }
-        armed[rule.id] = false
-
-        let idle = hits.reduce(0) { $0 + $1.gpuIdle }
-        let lines = hits.prefix(3).map { machine in
-            "\(machine.alias) \(machine.gpuIdle)/\(machine.gpuNumber)"
-                + (machine.hourlyPrice.map { String(format: " ¥%.2f/h", $0) } ?? "")
+        if armed[rule.id] ?? true {
+            armed[rule.id] = false
+            let idle = hits.reduce(0) { $0 + $1.gpuIdle }
+            let lines = hits.prefix(3).map { machine in
+                "\(machine.alias) \(machine.gpuIdle)/\(machine.gpuNumber)"
+                    + (machine.hourlyPrice.map { String(format: " ¥%.2f/h", $0) } ?? "")
+            }
+            let more = hits.count > 3 ? " 等 \(hits.count) 台" : ""
+            onAlert?(
+                "\(rule.regionName) 有空闲 \(rule.gpuName)",
+                "\(hits.count) 台机器共 \(idle) 张空闲（单机至少 \(rule.minCards) 张）：\(lines.joined(separator: "，"))\(more)",
+                "hunao.region.\(rule.id)"
+            )
         }
-        let more = hits.count > 3 ? " 等 \(hits.count) 台" : ""
-        onAlert?(
-            "\(rule.regionName) 有空闲 \(rule.gpuName)",
-            "\(hits.count) 台机器共 \(idle) 张空闲（单机至少 \(rule.minCards) 张）：\(lines.joined(separator: "，"))\(more)",
-            "hunao.region.\(rule.id)"
-        )
+
+        // One-shot: the opt-in is spent as soon as a clone was really started, so a billed instance is never
+        // ordered twice from a single arming.
+        // Every other armed rule cloning the same source is spent with it, so seven armed models can never
+        // order seven copies of one instance.
+        // Read the rule afresh: a clone started for another model a moment ago may have spent this one's opt-in.
+        if let live = alertRules.first(where: { $0.id == rule.id }), live.autoClone,
+           let source = live.cloneSourceID,
+           (cloneRetriesLeft[source] ?? Self.maxCloneAttempts) > 0,
+           onClone?(live, hits) == true {
+            let spent = alertRules.filter { $0.autoClone && $0.cloneSourceID == live.cloneSourceID }
+            spentCloneRules[source] = spent
+            cloneRetriesLeft[source] = (cloneRetriesLeft[source] ?? Self.maxCloneAttempts) - 1
+            for index in alertRules.indices where alertRules[index].cloneSourceID == source {
+                // Keep the consent identity so a pending task can detect a later manual cancellation.
+                alertRules[index].autoClone = false
+            }
+            persistRules()
+        }
     }
 
-    /// One cheap model-count query for the whole region; machine details are only fetched for a rule whose model
-    /// has enough idle cards in total, to confirm a single machine really has `minCards`.
-    private func watchRegion(account: AutoDLAccount, regionSign: String, chargeType: String) async {
-        let api = AutoDLAPI(token: account.token, isSubAccount: account.isSubAccount)
+    /// Clone queries use their source account and payg, and do not wait for the aggregate count query.
+    func watchRegion(
+        account: AutoDLAccount, regionSign: String, chargeType: String,
+        accountForSource: @escaping @MainActor (String) -> AutoDLAccount?
+    ) async {
+        let version = watchVersion
+        let api = AutoDLAPI(token: account.token, isSubAccount: account.isSubAccount, session: apiSession)
         let signs = groupSigns(for: regionSign)
-        let types: [GPUTypeStat]
-        do {
-            types = try await api.fetchGPUTypes(regionSigns: signs)
-        } catch {
-            for rule in rules(in: regionSign) { markScanFailed(rule, error) }
-            return
+        let ordered = rules(in: regionSign).sorted { $0.autoClone && !$1.autoClone }
+        let typesTask = Task { try await api.fetchGPUTypes(regionSigns: signs) }
+        await withTaskGroup(of: (RegionAlertRule, Result<[MarketMachine], Error>).self) { group in
+            for rule in ordered {
+                let owner = rule.autoClone ? rule.cloneSourceID.flatMap(accountForSource) : account
+                guard let owner, !owner.token.isEmpty else {
+                    markScanFailed(rule, AutoDLError.unauthorized)
+                    continue
+                }
+                let ruleAPI = AutoDLAPI(token: owner.token, isSubAccount: owner.isSubAccount, session: apiSession)
+                group.addTask {
+                    do {
+                        if !rule.autoClone {
+                            let types = try await typesTask.value
+                            if (types.first { $0.name == rule.gpuName }?.idle ?? 0) < rule.minCards {
+                                return (rule, .success([]))
+                            }
+                        }
+                        let machines = try await ruleAPI.fetchMarketMachines(
+                            gpuName: rule.gpuName, chargeType: rule.autoClone ? "payg" : chargeType, regionSigns: signs
+                        )
+                        return (rule, .success(machines))
+                    } catch {
+                        return (rule, .failure(error))
+                    }
+                }
+            }
+            for await (rule, result) in group {
+                guard !watchPaused, version == watchVersion,
+                      let current = alertRules.first(where: {
+                          $0.id == rule.id && $0.cloneAuthorizationID == rule.cloneAuthorizationID
+                      }) else { continue }
+                switch result {
+                case .success(let machines):
+                    let hits = machines
+                        .filter {
+                            $0.isRentable && $0.gpuIdle >= current.minCards && $0.gpuName == current.gpuName
+                                && signs.contains($0.regionSign)
+                        }
+                        .sorted { ($0.gpuIdle, $1.id) > ($1.gpuIdle, $0.id) }
+                    apply(current, hits: hits)
+                case .failure(let error):
+                    markScanFailed(rule, error)
+                }
+            }
         }
-        gpuTypesByRegion[regionSign] = types
-        gpuTypesFetchedAt[regionSign] = Date()
-
-        for rule in rules(in: regionSign) {
-            let idleTotal = types.first { $0.name == rule.gpuName }?.idle ?? 0
-            guard idleTotal >= rule.minCards else {
-                apply(rule, hits: [])
-                continue
-            }
-            let machines: [MarketMachine]
-            do {
-                machines = try await api.fetchMarketMachines(
-                    gpuName: rule.gpuName, chargeType: chargeType, regionSigns: signs
-                )
-            } catch {
-                markScanFailed(rule, error)
-                continue
-            }
-            let hits = machines
-                .filter { $0.isRentable && $0.gpuIdle >= rule.minCards }
-                .sorted { ($0.gpuIdle, $1.id) > ($1.gpuIdle, $0.id) }
-            apply(rule, hits: hits)
+        if let types = try? await typesTask.value, version == watchVersion {
+            gpuTypesByRegion[regionSign] = types
+            gpuTypesFetchedAt[regionSign] = Date()
         }
     }
 
@@ -606,6 +766,7 @@ final class MarketStore: ObservableObject {
     func startWatching(
         account: @escaping @MainActor () -> AutoDLAccount?,
         chargeType: @escaping @MainActor () -> String,
+        accountForSource: @escaping @MainActor (String) -> AutoDLAccount?,
         onAlert: @escaping (_ title: String, _ body: String, _ id: String) -> Void
     ) {
         guard watchTask == nil, !isDemo else { return }
@@ -614,13 +775,38 @@ final class MarketStore: ObservableObject {
         watchTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if !self.watchPaused, let current = account(), !current.token.isEmpty {
-                    await self.loadCatalogIfNeeded(account: current)
-                    for sign in Set(self.alertRules.map(\.regionSign)).sorted() {
-                        await self.watchRegion(account: current, regionSign: sign, chargeType: chargeType())
+                if !self.watchPaused {
+                    await self.loadCatalogIfNeeded(account: account())
+                    let signs = Set(self.alertRules.map(\.regionSign))
+                    for sign in Array(self.regionWatchTasks.keys) where !signs.contains(sign) {
+                        self.regionWatchTasks.removeValue(forKey: sign)?.cancel()
+                    }
+                    for sign in signs where self.regionWatchTasks[sign] == nil {
+                        self.regionWatchTasks[sign] = Task { [weak self] in
+                            var lastScan = Date.distantPast
+                            var failures = 0
+                            while !Task.isCancelled {
+                                guard let self else { return }
+                                let rules = self.rules(in: sign)
+                                let fast = rules.contains(where: \.autoClone)
+                                let fallback = account() ?? rules.compactMap { $0.cloneSourceID.flatMap(accountForSource) }.first
+                                if !self.watchPaused, let fallback,
+                                   fast || Date().timeIntervalSince(lastScan) >= Self.idleScanSeconds {
+                                    lastScan = Date()
+                                    await self.watchRegion(
+                                        account: fallback, regionSign: sign, chargeType: chargeType(),
+                                        accountForSource: accountForSource
+                                    )
+                                    let failed = self.rules(in: sign).contains { self.ruleScanStatus[$0.id]?.lastError != nil }
+                                    failures = failed ? min(failures + 1, 4) : 0
+                                }
+                                // Each region owns its delay: a slow/failing region cannot hold up another.
+                                try? await Task.sleep(nanoseconds: Self.fastScanNanos << UInt64(failures))
+                            }
+                        }
                     }
                 }
-                try? await Task.sleep(nanoseconds: 25_000_000_000)
+                try? await Task.sleep(nanoseconds: Self.fastScanNanos)
             }
         }
     }

@@ -35,7 +35,7 @@ struct AutoDLAPI {
         }
     }
 
-    func fetchInstances() async throws -> [AutoDLInstance] {
+    func fetchInstances(timeout: TimeInterval? = nil) async throws -> [AutoDLInstance] {
         let body: [String: Any] = [
             "date_from": "",
             "date_to": "",
@@ -44,7 +44,7 @@ struct AutoDLAPI {
             "status": [],
             "charge_type": []
         ]
-        let json = try await post(path: "/instance", body: body)
+        let json = try await post(path: "/instance", body: body, timeout: timeout)
         guard let data = json["data"] as? [String: Any],
               let rawList = data["list"] as? [[String: Any]]
         else {
@@ -223,6 +223,97 @@ struct AutoDLAPI {
         _ = try await post(path: "/instance/power_off", body: body)
     }
 
+    /// The pieces of a source instance's image that a clone request repeats; `/instance/snapshot` is where the
+    /// AutoDL console reads them before opening its own clone page.
+    struct CloneImage {
+        var baseImageUUID = ""
+        var cgApplicationInfo: [String: Any] = [:]
+    }
+
+    func fetchCloneImage(instanceUUID: String) async throws -> CloneImage {
+        let json = try await get(path: "/instance/snapshot", query: ["instance_uuid": instanceUUID])
+        guard let data = json["data"] as? [String: Any],
+              let image = data["image"] as? [String: Any]
+        else { throw AutoDLError.invalidResponse }
+        var result = CloneImage()
+        // The console sends the public image's name only for public images; private / CodeWithGPU ones go by uuid.
+        if jsonString(image["image_type"]) == "public" {
+            result.baseImageUUID = jsonString(image["image_name"]) ?? ""
+        }
+        result.cgApplicationInfo = data["cg_application_info"] as? [String: Any] ?? [:]
+        return result
+    }
+
+    /// Data disk (bytes) to ask for on the clone: always the source's own expansion, never less.
+    static func cloneExpandBytes(source: AutoDLInstance, machine: MarketMachine) -> Int64? {
+        source.expandDataDiskBytes
+    }
+
+    /// Whether `machine` can give the clone the same data disk the source has. A source without an expanded data
+    /// disk fits anywhere; otherwise the machine must report an expansion limit that covers it. An unreported
+    /// limit counts as "cannot confirm", so such a machine is not cloned onto.
+    static func machineFitsCloneDisk(source: AutoDLInstance, machine: MarketMachine) -> Bool {
+        guard let expansion = source.expandDataDiskBytes, expansion >= 0 else { return false }
+        guard expansion > 0 else { return true }
+        guard let cap = machine.maxDataDiskExpand else { return false }
+        return cap >= expansion
+    }
+
+    /// The request body of the console's "克隆实例" page, pay-as-you-go, system disk + data disk, sparse-file
+    /// optimisation on. Mirrors the field names the console's own page sends.
+    static func cloneBody(source: AutoDLInstance, image: CloneImage, machine: MarketMachine) throws -> [String: Any] {
+        guard let expand = cloneExpandBytes(source: source, machine: machine),
+              machineFitsCloneDisk(source: source, machine: machine),
+              machine.isRentable, machine.gpuIdle >= source.gpuCount else {
+            throw AutoDLError.clonePrecondition("无法确认目标机器满足源实例的卡数和完整数据盘容量，不下单")
+        }
+        return [
+            "instance_uuid": source.id,
+            "instance_info": [
+                "machine_id": machine.id,
+                "charge_type": "payg",
+                "req_gpu_amount": source.gpuCount,
+                "base_image_uuid": image.baseImageUUID,
+                "instance_name": "",
+                "private_image_uuid": source.privateImageUUID,
+                "reproduction_uuid": source.reproductionUUID,
+                "cg_application_uuid": source.cgApplicationUUID,
+                "cg_application_info": image.cgApplicationInfo,
+                "expand_data_disk": expand,
+                "copy_data_disk_after_clone": true,
+                "keep_src_user_service_address_after_clone": false,
+                "reproduction_id": source.reproductionID.map { $0 as Any } ?? NSNull(),
+                "ft_sparse": true
+            ] as [String: Any],
+            "price_info": [
+                "coupon_id_list": [String](),
+                "machine_id": machine.id,
+                "charge_type": "payg",
+                "duration": 1,
+                "num": source.gpuCount,
+                "expand_data_disk": expand
+            ] as [String: Any]
+        ]
+    }
+
+    /// Orders a pay-as-you-go clone of `source` onto `machine` and returns the new instance's uuid.
+    /// This creates a billed instance; callers must have an explicit opt-in from the user.
+    func cloneInstance(source: AutoDLInstance, image: CloneImage, machine: MarketMachine) async throws -> String {
+        let json = try await post(
+            path: "/order/instance/clone/payg",
+            body: try Self.cloneBody(source: source, image: image, machine: machine)
+        )
+        if let uuid = jsonString(json["data"]), !uuid.isEmpty { return uuid }
+        if let data = json["data"] as? [String: Any], let uuid = jsonString(data["uuid"]), !uuid.isEmpty { return uuid }
+        throw AutoDLError.invalidResponse
+    }
+
+    func instanceExists(uuid: String) async throws -> Bool {
+        let json = try await get(path: "/instance/exist", query: ["instance_uuid": uuid])
+        if let flag = json["data"] as? Bool { return flag }
+        return (jsonInt(json["data"]) ?? 0) != 0
+    }
+
     func fetchBalance() async throws -> AccountBalance {
         let json = try await get(path: "/wallet")
         guard let data = json["data"] as? [String: Any] else {
@@ -282,25 +373,34 @@ struct AutoDLAPI {
         return records
     }
 
-    private func get(path: String) async throws -> [String: Any] {
-        try await request(method: "GET", path: path, body: nil)
+    private func get(path: String, query: [String: String] = [:]) async throws -> [String: Any] {
+        try await request(method: "GET", path: path, query: query, body: nil)
     }
 
-    private func post(path: String, body: [String: Any]) async throws -> [String: Any] {
-        try await request(method: "POST", path: path, body: body)
+    private func post(path: String, body: [String: Any], timeout: TimeInterval? = nil) async throws -> [String: Any] {
+        try await request(method: "POST", path: path, body: body, timeout: timeout)
     }
 
     private func request(
         method: String,
         path: String,
-        body: [String: Any]?
+        query: [String: String] = [:],
+        body: [String: Any]?,
+        timeout: TimeInterval? = nil
     ) async throws -> [String: Any] {
         let accountPath = isSubAccount ? "/sub_user" + path : path
-        guard let url = URL(string: Self.baseURL.absoluteString + accountPath) else {
+        guard var components = URLComponents(string: Self.baseURL.absoluteString + accountPath) else {
+            throw AutoDLError.invalidResponse
+        }
+        if !query.isEmpty {
+            components.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
+        }
+        guard let url = components.url else {
             throw AutoDLError.invalidResponse
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
+        if let timeout { request.timeoutInterval = max(0.01, min(timeout, 20)) }
         request.setValue(token, forHTTPHeaderField: "Authorization")
         request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
         request.setValue("HuNaoAutoDL/1.0 (macOS)", forHTTPHeaderField: "User-Agent")
@@ -330,7 +430,7 @@ struct AutoDLAPI {
             throw AutoDLError.invalidResponse
         }
 
-        let code = jsonString(json["code"]) ?? ""
+        guard let code = jsonString(json["code"]) else { throw AutoDLError.invalidResponse }
         let message = jsonString(json["msg"]) ?? jsonString(json["message"]) ?? ""
         let success = code == "Success" || code == "success" || code == "0"
         guard success else {

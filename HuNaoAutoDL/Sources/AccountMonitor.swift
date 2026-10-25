@@ -14,6 +14,17 @@ private struct PendingModeCheck {
     var announcedUnconfirmed = false
 }
 
+/// Written before the paid POST. A lost response must survive relaunch without authorizing another order.
+struct PendingCloneOrder: Codable, Identifiable {
+    var id = UUID().uuidString
+    let sourceID: String
+    let sourceName: String
+    let regionSign: String
+    let machineID: String
+    let expansion: Int64
+    var uuid: String?
+}
+
 /// One signed-in AutoDL account. It polls its own instances, balance and target-host GPUs and runs
 /// auto-start and alerts whether or not it is the account currently shown in the window.
 @MainActor
@@ -40,6 +51,9 @@ final class AccountMonitor: ObservableObject, Identifiable {
     @Published private(set) var signedInAt: Date?
     /// Set when AutoDL rejects the token. The account stays in the list so it can be signed in again.
     @Published private(set) var authFailure: String?
+    @Published private(set) var pendingCloneOrders: [String: PendingCloneOrder] = [:]
+    @Published private(set) var preparingCloneSourceID: String?
+    @Published private(set) var cloneInFlight = false
 
     nonisolated let id: String
 
@@ -49,6 +63,9 @@ final class AccountMonitor: ObservableObject, Identifiable {
     private weak var app: AppModel?
     private let defaults: UserDefaults
     private let apiSession: URLSession?
+    private let marketFallback: MarketStore?
+    private var cloneMarket: MarketStore? { app?.market ?? marketFallback }
+    private var instancesFetchedAt: Date?
     private var monitoringTask: Task<Void, Never>?
     /// Bumped whenever the session changes (sign-in, re-login with the same token, expiry, removal). Every async path
     /// captures it up front and drops its result, errors included, if it no longer matches.
@@ -82,10 +99,12 @@ final class AccountMonitor: ObservableObject, Identifiable {
         app: AppModel?,
         inheritLegacySettings: Bool = false,
         defaults: UserDefaults = .standard,
-        session: URLSession? = nil
+        session: URLSession? = nil,
+        market: MarketStore? = nil
     ) {
         self.defaults = defaults
         self.apiSession = session
+        self.marketFallback = market
         let autoStartKey = Self.autoStartKey(account.id)
         let selectedKey = Self.selectedInstanceKey(account.id)
         if inheritLegacySettings {
@@ -106,6 +125,13 @@ final class AccountMonitor: ObservableObject, Identifiable {
         self.app = app
         autoStartEnabled = defaults.bool(forKey: autoStartKey)
         selectedInstanceID = defaults.string(forKey: selectedKey)
+        if let data = defaults.data(forKey: pendingCloneKey),
+           let orders = try? JSONDecoder().decode([String: PendingCloneOrder].self, from: data) {
+            pendingCloneOrders = orders
+            if !orders.isEmpty {
+                addActivity(kind: .warning, title: "有克隆订单待核对", detail: "之前的克隆尚未确认，不会自动重复下单；请到区域页核对")
+            }
+        }
     }
 
     // MARK: - Derived state
@@ -290,6 +316,7 @@ final class AccountMonitor: ObservableObject, Identifiable {
         monitoringTask?.cancel()
         monitoringTask = nil
         if forgetSettings {
+            for sourceID in knownInstanceIDs { cloneMarket?.disableAutoClones(sourceID: sourceID) }
             defaults.removeObject(forKey: selectedInstanceKey)
             defaults.removeObject(forKey: autoStartKey)
         }
@@ -324,6 +351,8 @@ final class AccountMonitor: ObservableObject, Identifiable {
     }
 
     private func resetOperations() {
+        cloneCancellationVersion += 1
+        cloneImages = [:]
         refreshTask = nil
         pendingRefresh = false
         isRefreshing = false
@@ -384,7 +413,8 @@ final class AccountMonitor: ObservableObject, Identifiable {
                 await self.refreshAll()
             }
             while !Task.isCancelled {
-                let interval = max(self.pollInterval, 8)
+                let cloning = self.instances.contains { self.cloneMarket?.hasAutoClone(sourceID: $0.id) == true }
+                let interval = max(min(self.pollInterval, cloning ? 10 : self.pollInterval), 1)
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 if Task.isCancelled { return }
                 if self.isPaused { continue }
@@ -548,6 +578,8 @@ final class AccountMonitor: ObservableObject, Identifiable {
     // MARK: - Target instance
 
     private func applyInstances(_ list: [AutoDLInstance]) {
+        instancesFetchedAt = Date()
+        reconcileCloneOrders(list)
         let previousList = instances
         setIfChanged(\.instances, list)
         knownInstanceIDs.formUnion(list.map(\.id))
@@ -660,6 +692,10 @@ final class AccountMonitor: ObservableObject, Identifiable {
     // MARK: - Automation
 
     func setAutoStart(_ enabled: Bool) {
+        if enabled, let selectedInstanceID, hasPendingCloneOrder(sourceID: selectedInstanceID) {
+            addActivity(kind: .warning, title: "自动开机未开启", detail: "该实例的克隆订单尚未确认，请先在区域页核对，避免两台同时计费")
+            return
+        }
         guard autoStartEnabled != enabled else { return }
         autoStartEnabled = enabled
         defaults.set(enabled, forKey: autoStartKey)
@@ -688,6 +724,7 @@ final class AccountMonitor: ObservableObject, Identifiable {
 
     func monitoringPauseChanged(_ paused: Bool) {
         if paused {
+            cloneCancellationVersion += 1
             addActivity(kind: .info, title: "监控已暂停", detail: "不再后台轮询，也不会提醒或自动开机")
         } else {
             // A fresh episode: a card that is free right now is reported once on resume.
@@ -755,6 +792,7 @@ final class AccountMonitor: ObservableObject, Identifiable {
         guard autoStartEnabled, !isPaused, !isStopped, authFailure == nil else { return }
         guard lostTarget == nil, let current = selectedInstance, current.id == instance.id else { return }
         guard current.state.isPoweredOff else { return }
+        guard !hasPendingCloneOrder(sourceID: current.id), cloneMarket?.hasAutoClone(sourceID: current.id) != true else { return }
         guard stock.matches(current), stock.isAvailable else { return }
         if let until = autoSuppressedUntil[current.id], until > Date() { return }
         if let lastAutoAttemptAt, Date().timeIntervalSince(lastAutoAttemptAt) < 60 {
@@ -806,6 +844,10 @@ final class AccountMonitor: ObservableObject, Identifiable {
         let generation = sessionGeneration
         let token = account.token
         guard isCurrent(generation), !token.isEmpty else { return }
+        if turnOn, hasPendingCloneOrder(sourceID: instance.id) {
+            addActivity(kind: .warning, title: "开机已阻止", detail: "克隆订单尚未确认，请先核对，避免源实例与克隆实例同时计费")
+            return
+        }
         guard claimInstance(instance.id, generation: generation) else {
             app?.presentToast(
                 kind: .info,
@@ -815,6 +857,7 @@ final class AccountMonitor: ObservableObject, Identifiable {
             return
         }
         actionInstanceID = instance.id
+        if turnOn { cloneMarket?.disableAutoClones(sourceID: instance.id) }
         // A hand-picked no-card boot must not be overtaken by an automatic GPU boot while the status catches up.
         if turnOn && noCard {
             autoSuppressedUntil[instance.id] = Date().addingTimeInterval(60)
@@ -905,6 +948,275 @@ final class AccountMonitor: ObservableObject, Identifiable {
                     app?.presentToast(kind: .warning, title: alertPrefix + "无法确认无卡模式", message: detail)
                 }
             }
+        }
+    }
+
+    // MARK: - Auto clone
+
+    private var lastCloneAt: Date?
+    private var cloneCancellationVersion = 0
+    private var cloneImages: [String: (image: AutoDLAPI.CloneImage, source: AutoDLInstance, fetchedAt: Date)] = [:]
+    private var failedCloneMachines: [String: Date] = [:]
+    private var lastCloneSkip: (reason: String, at: Date)?
+    private var cloneWarnings: [String: String] = [:]
+    var cloneConfirmationWindow: TimeInterval = 60
+    var cloneConfirmationNanos: UInt64 = 2_000_000_000
+    private var pendingCloneKey: String { "hunao.pendingCloneOrders.\(id)" }
+    private func cloneOrderSourceKey(_ sourceID: String) -> String { "hunao.cloneOrderBySource.\(sourceID)" }
+
+    private func hasPendingCloneOrder(sourceID: String) -> Bool {
+        pendingCloneOrders[sourceID] != nil || defaults.data(forKey: cloneOrderSourceKey(sourceID)) != nil
+    }
+
+    private func sameCloneConfiguration(_ a: AutoDLInstance, _ b: AutoDLInstance) -> Bool {
+        a.id == b.id && a.regionSign == b.regionSign && a.gpuCount == b.gpuCount
+            && a.expandDataDiskBytes == b.expandDataDiskBytes && a.privateImageUUID == b.privateImageUUID
+            && a.reproductionUUID == b.reproductionUUID && a.cgApplicationUUID == b.cgApplicationUUID
+            && a.reproductionID == b.reproductionID
+    }
+
+    func prefetchCloneImage(sourceID: String) {
+        guard !account.token.isEmpty, let source = instances.first(where: { $0.id == sourceID }) else { return }
+        let api = makeAPI(token: account.token)
+        let generation = sessionGeneration
+        Task { [weak self] in
+            guard let image = try? await api.fetchCloneImage(instanceUUID: sourceID) else { return }
+            guard let self, self.isCurrent(generation) else { return }
+            self.cloneImages[sourceID] = (image, source, Date())
+        }
+    }
+
+    func autoClone(rule: RegionAlertRule, hits: [MarketMachine]) -> Bool {
+        guard !isPaused, !isStopped, authFailure == nil, !account.token.isEmpty,
+              cloneMarket?.isCloneAuthorized(rule) == true else { return false }
+        func skip(_ reason: String) -> Bool {
+            if lastCloneSkip?.reason != reason || Date().timeIntervalSince(lastCloneSkip?.at ?? .distantPast) >= 30 {
+                addActivity(kind: .warning, title: "自动克隆已跳过", detail: reason)
+                lastCloneSkip = (reason, Date())
+            }
+            return false
+        }
+        guard let source = instances.first(where: { $0.id == rule.cloneSourceID }) else {
+            return skip("找不到克隆源实例，请在区域页重新开启")
+        }
+        if hasPendingCloneOrder(sourceID: source.id) {
+            if let data = defaults.data(forKey: cloneOrderSourceKey(source.id)),
+               let order = try? JSONDecoder().decode(PendingCloneOrder.self, from: data) {
+                pendingCloneOrders[source.id] = order
+            }
+            return skip("该源实例已有克隆订单待核对，不会重复下单；请在区域页核对")
+        }
+        guard source.state == .stopped || source.isNoCardMode else {
+            return skip("源实例正在使用 GPU、切换状态或状态未知，暂不克隆")
+        }
+        guard let fetchedAt = instancesFetchedAt, Date().timeIntervalSince(fetchedAt) <= 30 else {
+            return skip("源实例信息已过期，等待实例列表刷新后再检查容量")
+        }
+        guard source.expandDataDiskBytes != nil else {
+            return skip("无法确认源实例的数据盘扩容量，不克隆")
+        }
+        guard cloneMarket?.canonicalSign(for: source.regionSign) == rule.regionSign else {
+            return skip("「\(source.name)」不在 \(rule.regionName)，不能克隆到这里")
+        }
+        failedCloneMachines = failedCloneMachines.filter { Date().timeIntervalSince($0.value) < 30 }
+        let withCards = hits.filter {
+            $0.isRentable && $0.gpuIdle >= max(source.gpuCount, rule.minCards) && failedCloneMachines[$0.id] == nil
+                && $0.gpuName == rule.gpuName && cloneMarket?.canonicalSign(for: $0.regionSign) == rule.regionSign
+        }
+        let candidates = withCards
+            .filter { AutoDLAPI.machineFitsCloneDisk(source: source, machine: $0) }
+            .sorted { ($0.hourlyPrice ?? .infinity, -$0.gpuIdle) < ($1.hourlyPrice ?? .infinity, -$1.gpuIdle) }
+        guard let machine = candidates.first else {
+            if !withCards.isEmpty {
+                let need = Double(source.expandDataDiskBytes ?? 0) / 1_073_741_824
+                return skip("有空卡，但这些机器的数据盘可扩容上限不够源实例的 \(Int(need)) GB 扩容，不克隆")
+            }
+            return skip("没有单机同时空出 \(source.gpuCount) 张卡")
+        }
+        if cloneInFlight { return skip("上一次克隆还在处理中") }
+        if let lastCloneAt, Date().timeIntervalSince(lastCloneAt) < 60 { return skip("距上次克隆不足 60 秒") }
+        let generation = sessionGeneration
+        guard claimInstance(source.id, generation: generation) else { return skip("源实例正在处理开关机请求") }
+        lastCloneAt = Date()
+        cloneInFlight = true
+        preparingCloneSourceID = source.id
+        let version = cloneCancellationVersion
+        Task { await performClone(source: source, machine: machine, rule: rule, generation: generation, version: version) }
+        return true
+    }
+
+    func cancelPreparingClone(sourceID: String) {
+        guard preparingCloneSourceID == sourceID else { return }
+        cloneCancellationVersion += 1
+        cloneMarket?.disableAutoClones(sourceID: sourceID)
+        addActivity(kind: .info, title: "已取消待发送的克隆", detail: "尚未下单；已关闭该源实例的自动克隆规则")
+    }
+
+    func acknowledgeCloneOrder(sourceID: String, orderID: String) {
+        guard !cloneInFlight, pendingCloneOrders[sourceID]?.id == orderID else { return }
+        cloneMarket?.disableAutoClones(sourceID: sourceID)
+        clearCloneOrder(sourceID: sourceID, orderID: orderID)
+        addActivity(kind: .info, title: "克隆订单已人工核对", detail: "如需再次克隆，请重新开启规则；源实例自动开机仍保持关闭")
+    }
+
+    private func persistCloneOrders() -> Bool {
+        guard let data = try? JSONEncoder().encode(pendingCloneOrders) else { return false }
+        for (sourceID, order) in pendingCloneOrders {
+            let key = cloneOrderSourceKey(sourceID)
+            if let previous = defaults.data(forKey: key) {
+                guard let saved = try? JSONDecoder().decode(PendingCloneOrder.self, from: previous), saved.id == order.id else { return false }
+            }
+        }
+        for (sourceID, order) in pendingCloneOrders {
+            guard let value = try? JSONEncoder().encode(order) else { return false }
+            defaults.set(value, forKey: cloneOrderSourceKey(sourceID))
+        }
+        defaults.set(data, forKey: pendingCloneKey)
+        return defaults.synchronize()
+    }
+
+    private func clearCloneOrder(sourceID: String, orderID: String) {
+        guard pendingCloneOrders[sourceID]?.id == orderID else { return }
+        pendingCloneOrders[sourceID] = nil
+        let key = cloneOrderSourceKey(sourceID)
+        if let data = defaults.data(forKey: key),
+           let saved = try? JSONDecoder().decode(PendingCloneOrder.self, from: data), saved.id == orderID {
+            defaults.removeObject(forKey: key)
+        }
+        _ = persistCloneOrders()
+    }
+
+    private func reconcileCloneOrders(_ list: [AutoDLInstance]) {
+        // The source UUID survives logout/re-adding an account even when its local account ID changes.
+        for instance in list {
+            if let data = defaults.data(forKey: cloneOrderSourceKey(instance.id)),
+               let saved = try? JSONDecoder().decode(PendingCloneOrder.self, from: data) {
+                pendingCloneOrders[instance.id] = saved
+            }
+        }
+        for (sourceID, order) in pendingCloneOrders {
+            guard let uuid = order.uuid, let instance = list.first(where: { $0.id == uuid }) else { continue }
+            let expansionMatches = instance.expandDataDiskBytes == order.expansion
+            if !expansionMatches {
+                let detail = "\(instance.name) 的数据盘扩容量尚未确认与源实例一致，请到 AutoDL 核对；不会重复下单"
+                if cloneWarnings[sourceID] != detail {
+                    cloneWarnings[sourceID] = detail
+                    alert(kind: .warning, title: "克隆容量待核对", body: detail, identifier: "hunao.clone.disk.\(uuid)")
+                    addActivity(kind: .warning, title: "克隆容量待核对", detail: detail)
+                }
+            } else if instance.state == .running && instance.startMode.lowercased() == "gpu" {
+                clearCloneOrder(sourceID: sourceID, orderID: order.id)
+                addActivity(kind: .success, title: "克隆实例 GPU 与容量已确认", detail: "\(instance.name) 已以 GPU 模式运行，扩容量已对齐；文件复制完整性请在实例内核对")
+            }
+        }
+    }
+
+    private func performClone(
+        source: AutoDLInstance, machine: MarketMachine, rule: RegionAlertRule, generation: Int, version: Int
+    ) async {
+        defer {
+            cloneInFlight = false
+            preparingCloneSourceID = nil
+            releaseInstance(source.id, generation: generation)
+        }
+        func authorized() -> Bool {
+            isCurrent(generation) && !isPaused && version == cloneCancellationVersion
+                && cloneMarket?.isCloneAuthorized(rule) == true
+        }
+        guard authorized() else { return }
+        let api = makeAPI(token: account.token)
+        let target = "\(machine.alias) · \(machine.gpuName)"
+        var sentOrder: PendingCloneOrder?
+        addActivity(kind: .info, title: "自动克隆已触发", detail: "\(source.name) → \(target)（按量计费，系统盘+数据盘）")
+        do {
+            let image: AutoDLAPI.CloneImage
+            if let cached = cloneImages[source.id], Date().timeIntervalSince(cached.fetchedAt) < 300,
+               sameCloneConfiguration(cached.source, source) {
+                image = cached.image
+            } else {
+                image = try await api.fetchCloneImage(instanceUUID: source.id)
+                guard authorized() else { return }
+                cloneImages[source.id] = (image, source, Date())
+            }
+            guard authorized() else { return }
+            guard let latest = instances.first(where: { $0.id == source.id }), sameCloneConfiguration(latest, source),
+                  latest.state == .stopped || latest.isNoCardMode,
+                  let fetchedAt = instancesFetchedAt, Date().timeIntervalSince(fetchedAt) <= 30 else {
+                throw AutoDLError.clonePrecondition("准备期间源实例配置或状态已变化，请刷新后重新开启自动克隆")
+            }
+            _ = try AutoDLAPI.cloneBody(source: source, image: image, machine: machine)
+            guard let expansion = source.expandDataDiskBytes else {
+                throw AutoDLError.clonePrecondition("源实例扩容量未知，不下单")
+            }
+            let order = PendingCloneOrder(
+                sourceID: source.id, sourceName: source.name, regionSign: source.regionSign,
+                machineID: machine.id, expansion: expansion
+            )
+            pendingCloneOrders[source.id] = order
+            guard persistCloneOrders() else {
+                throw AutoDLError.clonePrecondition("无法保存克隆订单保护记录，已停止下单，请先核对本地存储")
+            }
+            if selectedInstanceID == source.id && autoStartEnabled {
+                autoStartEnabled = false
+                defaults.set(false, forKey: autoStartKey)
+                addActivity(kind: .info, title: "源实例自动开机已关闭", detail: "避免源实例与克隆实例同时占卡计费")
+            }
+            sentOrder = order
+            preparingCloneSourceID = nil
+            let uuid = try await api.cloneInstance(source: source, image: image, machine: machine)
+            if pendingCloneOrders[source.id]?.id == order.id {
+                pendingCloneOrders[source.id]?.uuid = uuid
+                _ = persistCloneOrders()
+            }
+            guard isCurrent(generation) else { return }
+            let detail = "\(source.name) → \(target)，订单已提交，新实例 \(uuid) 正在创建"
+            addActivity(kind: .success, title: "自动克隆已下单", detail: detail)
+            alert(kind: .success, title: "自动克隆已下单", body: detail, identifier: "hunao.clone.success.\(source.id)")
+            let deadline = Date().addingTimeInterval(cloneConfirmationWindow)
+            while Date() < deadline, isCurrent(generation), !isPaused {
+                if let list = try? await api.fetchInstances(timeout: max(0.01, deadline.timeIntervalSinceNow)) {
+                    guard isCurrent(generation) else { return }
+                    applyInstances(list)
+                    if pendingCloneOrders[source.id] == nil { return }
+                }
+                let remaining = deadline.timeIntervalSinceNow
+                guard remaining > 0 else { break }
+                try? await Task.sleep(nanoseconds: min(cloneConfirmationNanos, UInt64(remaining * 1_000_000_000)))
+            }
+            guard isCurrent(generation), pendingCloneOrders[source.id] != nil else { return }
+            let warning = "新实例 \(uuid) 已下单，但尚未确认 GPU 运行及容量；请在 AutoDL 核对创建和数据盘复制状态，不会再次下单。后续刷新会继续核对。"
+            addActivity(kind: .warning, title: "克隆订单待确认", detail: warning)
+            alert(kind: .warning, title: "克隆订单待确认", body: warning, identifier: "hunao.clone.pending.\(uuid)")
+        } catch let error as AutoDLError where error.isAuthFailure {
+            if let sentOrder {
+                clearCloneOrder(sourceID: source.id, orderID: sentOrder.id)
+            }
+            expireIfCurrent(generation, reason: error.localizedDescription)
+        } catch {
+            // Only console-confirmed pre-order rejection codes may release the durable order guard.
+            let rejected = (error as? AutoDLError)?.isDefinitiveCloneRejection == true
+            if rejected, let sentOrder {
+                clearCloneOrder(sourceID: source.id, orderID: sentOrder.id)
+            }
+            guard isCurrent(generation) else { return }
+            let detail = error.localizedDescription
+            if sentOrder != nil && !rejected {
+                let warning = "\(detail)。下单结果未知，请在区域页核对订单；已停止重试，避免重复创建计费实例。"
+                addActivity(kind: .warning, title: "克隆下单结果未知", detail: warning)
+                alert(kind: .warning, title: "克隆下单结果未知", body: warning, identifier: "hunao.clone.unknown.\(source.id)")
+                return
+            }
+            addActivity(kind: .error, title: "自动克隆失败", detail: detail)
+            var retryNote = ""
+            if authorized(), (error as? AutoDLError)?.isRetryableCloneRejection == true {
+                failedCloneMachines[machine.id] = Date()
+                lastCloneAt = nil
+                if let left = cloneMarket?.restoreAutoClone(for: rule) {
+                    retryNote = "，已重新守候（还可重试 \(left) 次）"
+                    addActivity(kind: .info, title: "自动克隆重新守候", detail: "换一台机器再试，还可重试 \(left) 次")
+                }
+            }
+            app?.presentToast(kind: .error, title: alertPrefix + "自动克隆失败", message: detail + retryNote)
         }
     }
 

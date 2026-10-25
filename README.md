@@ -2,7 +2,7 @@
   <img src="HuNaoAutoDL/Resources/AppIcon-1024.png" width="128" alt="胡闹AutoDL 图标">
 </p>
 
-<h1 align="center">胡闹AutoDL</h1>
+<h1 align="center">胡闹AutoDL v2</h1>
 
 <p align="center"><strong>哎呀，这简直是胡！闹！</strong></p>
 
@@ -13,15 +13,15 @@
   <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-6e56cf?style=flat-square" alt="Apple Silicon">
   <img src="https://img.shields.io/badge/Windows-10%2F11%20x64-0078d4?style=flat-square&logo=windows&logoColor=white" alt="Windows 10/11 x64">
   <img src="https://img.shields.io/badge/Swift-6-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 6">
-  <img src="https://img.shields.io/badge/version-1.2.0-34c759?style=flat-square" alt="Version 1.2.0">
+  <img src="https://img.shields.io/badge/macOS-1.3.0-34c759?style=flat-square" alt="macOS Version 1.3.0">
 </p>
 
 <p align="center">
   <a href="https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/latest">
-    <img src="https://img.shields.io/badge/下载-macOS%20v1.2.0-34c759?style=for-the-badge&logo=apple&logoColor=white" alt="下载 macOS 版">
+    <img src="https://img.shields.io/badge/下载-macOS%20v1.3.0-34c759?style=for-the-badge&logo=apple&logoColor=white" alt="下载 macOS 版">
   </a>
-  <a href="https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-win-x64.exe">
-    <img src="https://img.shields.io/badge/下载-Windows%20v1.2.0-0078d4?style=for-the-badge&logo=windows&logoColor=white" alt="下载 Windows 版">
+  <a href="https://github.com/A2ureeE/CrazyAutoDL/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-win-x64.exe">
+    <img src="https://img.shields.io/badge/上游旧版-Windows%20v1.2.0-0078d4?style=for-the-badge&logo=windows&logoColor=white" alt="下载上游 Windows 旧版">
   </a>
 </p>
 
@@ -33,10 +33,12 @@ AutoDL 的闲置 GPU 就像食堂最后一份糖醋排骨：犹豫几秒，就�
 
 胡闹AutoDL 是一个常驻系统托盘的 AutoDL 监控小工具。它会按你设定的节奏轮询目标实例所在的 GPU 池，一旦发现空闲显卡，立刻通知你，或者直接帮你把实例开机。没有网页标签页，没有反复刷新，也没有 Keychain 密码弹窗。
 
-- **双平台**：macOS 使用原生 SwiftUI 与 Liquid Glass 界面；Windows 使用 Electron，界面与功能保持一致。
+- **双平台源码**：macOS v2 使用原生 SwiftUI 与 Liquid Glass 界面；Windows 保留上游 Electron 版，尚未移植本次自动克隆与快速扫描功能。
 - **Liquid Glass 界面**：深色极光背景、玻璃卡片与柔和光效；macOS 版支持全局字号缩放。
 - **本地优先**：Token 只保存在本机，所有数据只在你的电脑与 AutoDL 之间流动。
 - **测试数据模式**：以内置演示数据离线预览完整界面。
+
+macOS `v1.3.0` 新增区域自动克隆、克隆订单核对保护，以及 1 / 3 秒轮询选项。完整记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 界面预览
 
@@ -72,6 +74,9 @@ AutoDL 的闲置 GPU 就像食堂最后一份糖醋排骨：犹豫几秒，就�
 | --- | --- |
 | GPU 空闲哨兵 | 轮询目标主机所在 GPU 池，展示空闲卡数量与槽位分布 |
 | 自动开机 | 发现空闲 GPU 后可自动开机，失败与成功都会留下记录 |
+| 区域自动克隆（macOS） | 手动开启一次后，在源实例同区域找到符合 GPU 卡数与数据盘容量的机器时，按量计费克隆系统盘与数据盘 |
+| 克隆订单保护（macOS） | 结果未知时停止重试并保存待核对订单；与源实例开机互斥，避免重复创建计费实例 |
+| 快速轮询（macOS） | 设置支持 1 / 3 秒短时抢卡；开启克隆的区域每轮扫描后约等 1 秒，失败时退避 |
 | 手动开关机 | 在实例列表中直接开机或关机，无需打开浏览器 |
 | 释放时间 | 展示实例最早的有效释放时间，完整时间与倒计时可在提示中查看 |
 | 资源余量 | 监控台用圆形仪表盘展示剩余内存与剩余存储 |
@@ -107,8 +112,8 @@ AutoDL 的闲置 GPU 就像食堂最后一份糖醋排骨：犹豫几秒，就�
 
 | 平台 | 文件 | 说明 |
 | --- | --- | --- |
-| macOS | [`HuNaoAutoDL-1.2.0-arm64.dmg`](https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-arm64.dmg) / [`.zip`](https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-arm64.zip) | 要求 macOS 15 及以上、Apple Silicon |
-| Windows | [`HuNaoAutoDL-1.2.0-win-x64.exe`](https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-win-x64.exe) | 安装版，支持应用内自动更新 |
+| macOS v2 | [`HuNaoAutoDL-1.3.0-arm64.dmg`](https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.3.0/HuNaoAutoDL-1.3.0-arm64.dmg) / [`.zip`](https://github.com/zhuhaoxiang1/CrazyAutoDL-v2/releases/download/v1.3.0/HuNaoAutoDL-1.3.0-arm64.zip) | 要求 macOS 15 及以上、Apple Silicon；校验值见同一 Release 的 `SHA256SUMS.txt` |
+| Windows 上游旧版 | [`HuNaoAutoDL-1.2.0-win-x64.exe`](https://github.com/A2ureeE/CrazyAutoDL/releases/download/v1.2.0/HuNaoAutoDL-1.2.0-win-x64.exe) | 来自原项目，不含本次 macOS v2 更新 |
 
 macOS 应用使用 ad-hoc 签名、没有经过 Apple 公证，首次打开时系统可能会拦截。请在 Finder 中右键应用选择「打开」，或前往「系统设置 → 隐私与安全性」点击「仍要打开」。
 
@@ -120,20 +125,20 @@ Windows 安装包 SHA-256：`f7265fc41ad9bdd6912244e7e38e514103b8be4d0bbb68c5e5f
 
 ```bash
 git clone https://github.com/zhuhaoxiang1/CrazyAutoDL-v2.git
-cd CrazyAutoDL
+cd CrazyAutoDL-v2
 
 # 编译、打包并 ad-hoc 签名
 ./HuNaoAutoDL/scripts/build-app.sh
 
 # 运行
-open "dist/胡闹AutoDL.app"
+open "dist/胡闹AutoDL v2.app"
 ```
 
 安装到「应用程序」：
 
 ```bash
-cp -R "dist/胡闹AutoDL.app" /Applications/
-open "/Applications/胡闹AutoDL.app"
+cp -R "dist/胡闹AutoDL v2.app" /Applications/
+open "/Applications/胡闹AutoDL v2.app"
 ```
 
 构建脚本会把所有 Swift 源文件编译为单一可执行文件，复制图标与 `Info.plist`，在临时目录完成签名后再输出到 `dist/`。首次启动时，如果 macOS 提示无法验证开发者，可在 Finder 中右键应用并选择「打开」。
@@ -144,7 +149,7 @@ open "/Applications/胡闹AutoDL.app"
 
 ```powershell
 git clone https://github.com/zhuhaoxiang1/CrazyAutoDL-v2.git
-cd CrazyAutoDL\windows
+cd CrazyAutoDL-v2\windows
 
 npm ci
 npm run dist
@@ -166,7 +171,7 @@ npm run dist
 
 其余离线回归检查（均不访问真实账户、不改动真实设置）：
 
-- macOS：`zsh HuNaoAutoDL/scripts/test-monitor.sh`（监控、开机互斥、会话隔离、库存分页、退款口径）、`test-accounts.sh`、`test-region-alerts.sh`
+- macOS：`zsh HuNaoAutoDL/scripts/test-monitor.sh`（监控、克隆订单保护、开机互斥、会话隔离、库存分页、退款口径）、`test-accounts.sh`、`test-region-alerts.sh`
 - Windows：`cd windows && npm test`（引擎、请求超时、凭证存储、账单口径）
 
 相关设计文档：[docs/claude-codex-integration-changes.md](docs/claude-codex-integration-changes.md)
@@ -179,7 +184,7 @@ npm run dist
 
 在监控台右侧的「自动开机」卡片中开启开关。之后只要目标 GPU 池出现空闲卡，应用就会尝试开机，并发送本地通知。
 
-- 默认每 15 秒检查一次。macOS 可在设置中选择 10 / 15 / 30 / 60 秒，Windows 使用 8–120 秒滑杆。
+- 默认每 15 秒检查一次。macOS 可在设置中选择 1 / 3 / 10 / 15 / 30 / 60 秒，Windows 使用 8–120 秒滑杆。1–3 秒适合短时间抢卡，长期使用建议 10–15 秒。
 - 自动开机失败后，会等待 60 秒再重试，避免连续请求接口。
 - 关闭自动开机时，发现空闲卡仍会提醒，但不会自动操作。
 
@@ -213,6 +218,19 @@ macOS 版本点击菜单栏图标会弹出快捷面板，Windows 版本右键点
 - 暂停状态会保存，重启后保持；点「恢复监控」后立即刷新一次，此刻有空闲卡会照常提醒。
 
 本版本不含应用内更新和「关于」页，请自行获取新构建。
+
+### 8. 区域自动克隆（macOS v2）
+
+在源实例所在区域添加 GPU 提醒规则，选择卡数后点击「克隆」，阅读计费说明并确认「开启（仅一次）」。源实例必须已关机或处于无卡模式；目标机器必须满足源实例的 GPU 卡数和完整数据盘扩容量。
+
+- 开启后会检查当前已有空卡；各区域独立扫描，克隆规则所在区域每轮完成后约等 1 秒，失败时逐步退避。
+- 克隆使用源实例所属账户，按量计费，复制系统盘与数据盘并开启稀疏文件优化；新实例会开始计费。
+- 同一源实例的多个 GPU 规则只触发一次克隆。仅在服务端明确返回库存不足时换机重试，总共最多尝试 3 次。
+- 超时或返回结果无法确认时，保留「克隆订单待核对」记录，重启后仍有效；请先在 AutoDL 控制台核对，再手动解除保护。
+- 下单后关闭源实例自动开机；订单未确认期间阻止源实例开机。确认新实例的 GPU 运行模式与数据盘扩容量后解除订单保护，文件复制完整性仍需在实例内检查。
+- 准备阶段可取消；暂停监控、移除账户或修改规则会使尚未发送的旧任务失效。
+
+自动克隆的回归测试使用本地模拟接口，不会创建真实计费实例。
 
 ## 数据与隐私
 
